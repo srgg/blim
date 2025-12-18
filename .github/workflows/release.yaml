@@ -1,0 +1,141 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Install LuaJIT
+        run: brew install luajit
+
+      - name: Configure LuaJIT paths
+        run: |
+          LUAJIT_PREFIX=$(brew --prefix luajit)
+          # Create lua5.1.pc symlink since golua looks for lua5.1
+          ln -sf ${LUAJIT_PREFIX}/lib/pkgconfig/luajit.pc ${LUAJIT_PREFIX}/lib/pkgconfig/lua5.1.pc
+          echo "PKG_CONFIG_PATH=${LUAJIT_PREFIX}/lib/pkgconfig:$PKG_CONFIG_PATH" >> $GITHUB_ENV
+          echo "CGO_CFLAGS=-I${LUAJIT_PREFIX}/include/luajit-2.1" >> $GITHUB_ENV
+          echo "CGO_LDFLAGS=-L${LUAJIT_PREFIX}/lib -lluajit-5.1" >> $GITHUB_ENV
+
+      - name: Build
+        run: |
+          mkdir -p dist
+          go build -ldflags "-s -w -X main.version=${{ github.ref_name }} -X main.commit=$(git rev-parse --short HEAD)" \
+            -o dist/blim ./cmd/blim
+
+      - name: Create archive
+        run: |
+          cd dist
+          tar -czvf blim_darwin_arm64.tar.gz blim
+          shasum -a 256 blim_darwin_arm64.tar.gz > blim_darwin_arm64.tar.gz.sha256
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: blim-darwin-arm64
+          path: dist/blim_darwin_arm64.tar.gz*
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release files
+        run: |
+          mkdir -p release
+          find artifacts -type f \( -name "*.tar.gz" -o -name "*.sha256" \) -exec mv {} release/ \;
+          cd release
+          cat *.sha256 > checksums.txt
+          rm *.sha256
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  homebrew:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Calculate checksum
+        id: checksums
+        run: |
+          ARM64_SHA=$(shasum -a 256 artifacts/blim-darwin-arm64/blim_darwin_arm64.tar.gz | cut -d' ' -f1)
+          echo "arm64_sha=${ARM64_SHA}" >> $GITHUB_OUTPUT
+
+      - name: Update Homebrew formula
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          TAG_NAME: ${{ github.ref_name }}
+          ARM64_SHA: ${{ steps.checksums.outputs.arm64_sha }}
+        run: |
+          VERSION="${TAG_NAME#v}"  # Remove 'v' prefix
+
+          # Clone the tap repo
+          git clone https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/srgg/homebrew-blim.git tap
+          mkdir -p tap/Formula
+
+          # Generate the formula (arm64 only)
+          cat > tap/Formula/blim.rb << FORMULA
+          class Blim < Formula
+            desc "BLE command-line tool with Lua scripting for device automation"
+            homepage "https://github.com/srgg/blim"
+            license "MIT"
+            version "${VERSION}"
+
+            depends_on arch: :arm64
+
+            url "https://github.com/srgg/blim/releases/download/${TAG_NAME}/blim_darwin_arm64.tar.gz"
+            sha256 "${ARM64_SHA}"
+
+            def install
+              bin.install "blim"
+            end
+
+            test do
+              system bin/"blim", "--help"
+            end
+          end
+          FORMULA
+
+          # Remove leading whitespace
+          sed -i 's/^          //' tap/Formula/blim.rb
+
+          # Commit and push
+          cd tap
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git add Formula/blim.rb
+          git commit -m "Update blim to ${VERSION}"
+          git push

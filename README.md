@@ -15,6 +15,18 @@ It provides high-level building blocks for scanning, bridging, and inspecting BL
 
 ## Installation
 
+### Install via Homebrew (macOS, Apple Silicon)
+
+```bash
+brew install srgg/blim/blim
+```
+
+Or explicitly tap first:
+```bash
+brew tap srgg/blim
+brew install blim
+```
+
 ### Install via Go
 
 ```bash

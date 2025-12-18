@@ -43,7 +43,7 @@ coverage/
 
 # Generated files outside .tmp/
 site/
-internal/bledb/bledb_generated.go
+# internal/bledb/bledb_generated.go
 
 # Shell script temp files
 scripts/*.log

@@ -1,0 +1,47 @@
+version: 2
+
+project_name: blim
+
+builds:
+  - main: ./cmd/blim
+    binary: blim
+    env:
+      - CGO_ENABLED=1
+    goos:
+      - darwin
+    goarch:
+      - "{{ .Env.GOARCH }}"
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.ShortCommit}}
+
+archives:
+  - format: tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
+
+brews:
+  - repository:
+      owner: srg
+      name: homebrew-blim
+      branch: main
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    directory: Formula
+    homepage: "https://github.com/srg/blecli"
+    description: "BLE command-line tool with Lua scripting for device automation"
+    license: "MIT"
+    install: |
+      bin.install "blim"
+    test: |
+      system "#{bin}/blim", "--help"
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
