@@ -23,23 +23,42 @@ jobs:
       - name: Install LuaJIT
         run: brew install luajit
 
-      - name: Configure LuaJIT paths
+      - name: Configure LuaJIT paths (static linking)
         run: |
           LUAJIT_PREFIX=$(brew --prefix luajit)
-          # Create lua5.1.pc symlink since golua looks for lua5.1
-          ln -sf ${LUAJIT_PREFIX}/lib/pkgconfig/luajit.pc ${LUAJIT_PREFIX}/lib/pkgconfig/lua5.1.pc
-          echo "PKG_CONFIG_PATH=${LUAJIT_PREFIX}/lib/pkgconfig:$PKG_CONFIG_PATH" >> $GITHUB_ENV
-          echo "CGO_CFLAGS=-I${LUAJIT_PREFIX}/include/luajit-2.1" >> $GITHUB_ENV
-          echo "CGO_LDFLAGS=-L${LUAJIT_PREFIX}/lib -lluajit-5.1" >> $GITHUB_ENV
+
+          # Create static pkg-config file to force static linking
+          mkdir -p /tmp/pkgconfig
+          cat > /tmp/pkgconfig/lua5.1.pc << EOF
+          prefix=${LUAJIT_PREFIX}
+          libdir=\${prefix}/lib
+          includedir=\${prefix}/include/luajit-2.1
+
+          Name: LuaJIT
+          Description: LuaJIT (static)
+          Version: 2.1
+          Libs: \${libdir}/libluajit-5.1.a
+          Cflags: -I\${includedir}
+          EOF
+
+          echo "PKG_CONFIG_PATH=/tmp/pkgconfig" >> $GITHUB_ENV
 
       - name: Build
         run: |
           mkdir -p dist
-          # Static link LuaJIT to avoid runtime dependency
-          LUAJIT_PREFIX=$(brew --prefix luajit)
-          CGO_LDFLAGS="-L${LUAJIT_PREFIX}/lib ${LUAJIT_PREFIX}/lib/libluajit-5.1.a" \
           go build -ldflags "-s -w -X main.version=${{ github.ref_name }} -X main.commit=$(git rev-parse --short HEAD)" \
             -o dist/blim ./cmd/blim
+
+      - name: Verify static linking
+        run: |
+          echo "Checking binary dependencies..."
+          otool -L dist/blim
+          if otool -L dist/blim | grep -q "libluajit"; then
+            echo "ERROR: Binary is dynamically linked to LuaJIT!"
+            exit 1
+          fi
+          echo "SUCCESS: No dynamic LuaJIT dependency"
+          dist/blim --version
 
       - name: Create archive
         run: |
