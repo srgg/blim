@@ -171,7 +171,7 @@ func runSingleScan(scanner *scanner.Scanner, opts *scanner.ScanOptions, cfg *sca
 	// Perform scan
 	devices, err := scanner.Scan(ctx, opts, progress.Callback())
 
-	if err != nil && !errors.Is(err, context.Canceled) {
+	if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, device.ErrTimeout) {
 		logger.WithError(err).Error("scan failed")
 		return err
 	}

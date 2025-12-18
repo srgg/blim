@@ -103,7 +103,7 @@ func (s *Scanner) Scan(ctx context.Context, opts *ScanOptions, progressCallback 
 	}()
 
 	err = s.scanDevice.Scan(ctx, opts.DuplicateFilter, s.handleAdvertisement)
-	if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+	if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, device.ErrTimeout) {
 		return nil, fmt.Errorf("scan failed: %w", err)
 	}
 

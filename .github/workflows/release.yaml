@@ -35,6 +35,9 @@ jobs:
       - name: Build
         run: |
           mkdir -p dist
+          # Static link LuaJIT to avoid runtime dependency
+          LUAJIT_PREFIX=$(brew --prefix luajit)
+          CGO_LDFLAGS="-L${LUAJIT_PREFIX}/lib ${LUAJIT_PREFIX}/lib/libluajit-5.1.a" \
           go build -ldflags "-s -w -X main.version=${{ github.ref_name }} -X main.commit=$(git rev-parse --short HEAD)" \
             -o dist/blim ./cmd/blim
 
