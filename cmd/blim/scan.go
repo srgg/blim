@@ -316,7 +316,6 @@ func displayDevicesTable(entries []scanner.DeviceEntry) error {
 	}
 	w := tabwriter.NewWriter(base, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(w, "NAME\tADDRESS\tRSSI\tSERVICES\tLAST SEEN")
-	fmt.Fprintln(w, strings.Repeat("-", 80))
 
 	for _, e := range entries {
 		dev := e.Device
