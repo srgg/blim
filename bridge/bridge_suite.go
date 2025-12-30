@@ -157,8 +157,9 @@ func (suite *BridgeSuite) ExecuteScriptWithCallbacks(
 			nil, // stdout - collector handles
 			nil, // stderr - collector handles
 			scriptOutputTickInterval,
-			0, // use LuaAPI defaults for characteristic read timeout
-			0, // use LuaAPI defaults for characteristic write timeout
+			0,   // use LuaAPI defaults for characteristic read timeout
+			0,   // use LuaAPI defaults for characteristic write timeout
+			nil, // no script options for test scripts
 		)
 		scriptErr = err
 

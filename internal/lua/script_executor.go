@@ -12,6 +12,17 @@ import (
 	"github.com/srg/blim/internal/groutine"
 )
 
+// ScriptOptions holds configuration for Lua script execution.
+type ScriptOptions struct {
+	// ScriptPath is the filesystem path to the main script file.
+	// Its directory is automatically added to package.path for require().
+	ScriptPath string
+
+	// AdditionalLuaPaths are extra directories to search for Lua modules.
+	// These are added to package.path before the default search paths.
+	AdditionalLuaPaths []string
+}
+
 // ExecuteDeviceScriptWithOutput executes a Lua script with the given device and arguments,
 // writing all output to the provided writers.
 // The script is executed synchronously, and all output is drained from the channel.
@@ -27,6 +38,7 @@ import (
 //   - drainTimeout: How long to wait for output after script completes (e.g., 50ms)
 //   - characteristicReadTimeout: Timeout for characteristic read operations (0 = use default)
 //   - characteristicWriteTimeout: Timeout for characteristic write operations (0 = use default)
+//   - opts: Optional script options for module path configuration (can be nil)
 //
 // Returns an error if script execution fails.
 func ExecuteDeviceScriptWithOutput(
@@ -40,6 +52,7 @@ func ExecuteDeviceScriptWithOutput(
 	drainTimeout time.Duration,
 	characteristicReadTimeout time.Duration,
 	characteristicWriteTimeout time.Duration,
+	opts *ScriptOptions,
 ) error {
 
 	if luaAPI == nil {
@@ -54,6 +67,11 @@ func ExecuteDeviceScriptWithOutput(
 		if characteristicWriteTimeout > 0 {
 			luaAPI.characteristicWriteTimeout = characteristicWriteTimeout
 		}
+	}
+
+	// Configure Lua package.path for module loading
+	if opts != nil && (opts.ScriptPath != "" || len(opts.AdditionalLuaPaths) > 0) {
+		luaAPI.LuaEngine.SetScriptSearchPaths(opts.ScriptPath, opts.AdditionalLuaPaths)
 	}
 
 	logger.WithField("script_size", len(script)).Debug("Starting Lua script execution")

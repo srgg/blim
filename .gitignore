@@ -56,3 +56,6 @@ compile_commands.json
 
 # Generated testify/depend dependency files
 *_depend_test.go
+
+# GoReleaser output
+dist/

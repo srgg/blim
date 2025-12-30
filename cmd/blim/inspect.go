@@ -178,6 +178,7 @@ func executeInspectLuaScript(ctx context.Context, dev device.Device, logger *log
 
 	// Execute the embedded script with output streaming
 	// Note: Write timeout is 0 because the inspect command only does read characteristics
+	// Note: No ScriptOptions needed for embedded scripts (no external module loading)
 	return lua.ExecuteDeviceScriptWithOutput(
 		ctx,
 		dev,
@@ -189,6 +190,7 @@ func executeInspectLuaScript(ctx context.Context, dev device.Device, logger *log
 		os.Stderr,
 		luaOutputPollInterval,
 		characteristicReadTimeout,
-		0, // write timeout not needed for inspect
+		0,   // write timeout not needed for inspect
+		nil, // no script options for embedded scripts
 	)
 }

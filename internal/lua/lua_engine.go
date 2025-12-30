@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime/debug"
 	"strings"
 	"time"
@@ -597,6 +598,59 @@ func (e *LuaEngine) Close() {
 		e.state.Close()
 		e.state = nil
 	}
+}
+
+// SetScriptSearchPaths configures Lua's package.path for module loading.
+// It prepends the script's directory and any additional paths to the search path,
+// enabling require() to find modules relative to the script location.
+//
+// Parameters:
+//   - scriptPath: path to the main script file (its directory is added to search path)
+//   - additionalPaths: optional extra directories to search for modules
+func (e *LuaEngine) SetScriptSearchPaths(scriptPath string, additionalPaths []string) {
+	e.DoWithState(func(L *lua.State) interface{} {
+		// Get current package.path
+		L.GetGlobal("package")
+		L.GetField(-1, "path")
+		currentPath := L.ToString(-1)
+		L.Pop(1) // pop current path value
+
+		// Build new path: script dir + additional paths + original path
+		var pathParts []string
+
+		// Add script's directory if provided
+		if scriptPath != "" {
+			absPath, err := filepath.Abs(scriptPath)
+			if err == nil {
+				scriptDir := filepath.Dir(absPath)
+				pathParts = append(pathParts, scriptDir+"/?.lua")
+				pathParts = append(pathParts, scriptDir+"/?/init.lua")
+				e.logger.WithField("script_dir", scriptDir).Debug("Added script directory to Lua package.path")
+			}
+		}
+
+		// Add additional paths
+		for _, p := range additionalPaths {
+			absPath, err := filepath.Abs(p)
+			if err == nil {
+				pathParts = append(pathParts, absPath+"/?.lua")
+				pathParts = append(pathParts, absPath+"/?/init.lua")
+				e.logger.WithField("path", absPath).Debug("Added additional path to Lua package.path")
+			}
+		}
+
+		// Append original path at the end
+		pathParts = append(pathParts, currentPath)
+
+		// Set new package.path
+		newPath := strings.Join(pathParts, ";")
+		L.PushString(newPath)
+		L.SetField(-2, "path")
+		L.Pop(1) // pop package table
+
+		e.logger.WithField("package_path", newPath).Debug("Configured Lua package.path")
+		return nil
+	})
 }
 
 // ExecuteFunction executes a specific Lua function by name

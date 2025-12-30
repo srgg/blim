@@ -49,6 +49,7 @@ var (
 	bridgeCharacteristicReadTimeout  time.Duration
 	bridgeCharacteristicWriteTimeout time.Duration
 	bridgeLuaScript                  string
+	bridgeLuaPaths                   []string
 	bridgeSymlink                    string
 )
 
@@ -59,6 +60,7 @@ func init() {
 	bridgeCmd.Flags().DurationVar(&bridgeCharacteristicReadTimeout, "characteristic-read-timeout", 0, "Timeout for characteristic read operations (0 = use default: 5s)")
 	bridgeCmd.Flags().DurationVar(&bridgeCharacteristicWriteTimeout, "characteristic-write-timeout", 0, "Timeout for characteristic write operations (0 = use default: 5s)")
 	bridgeCmd.Flags().StringVar(&bridgeLuaScript, "script", "", "Lua script file with ble_to_tty() and tty_to_ble() functions")
+	bridgeCmd.Flags().StringSliceVar(&bridgeLuaPaths, "lua-path", nil, "Additional directories to search for Lua modules (can be specified multiple times)")
 	bridgeCmd.Flags().StringVar(&bridgeSymlink, "symlink", "", "Create a symlink to the PTY device (e.g., /tmp/ble-device)")
 }
 
@@ -112,6 +114,17 @@ func runBridge(cmd *cobra.Command, args []string) error {
 
 	var scriptArgs map[string]string
 
+	// Configure Lua module search paths:
+	// - Script's directory is automatically included (enables require() for co-located modules)
+	// - Additional paths from --lua-path flag are prepended to search order
+	var scriptOpts *lua.ScriptOptions
+	if bridgeLuaScript != "" || len(bridgeLuaPaths) > 0 {
+		scriptOpts = &lua.ScriptOptions{
+			ScriptPath:         bridgeLuaScript,
+			AdditionalLuaPaths: bridgeLuaPaths,
+		}
+	}
+
 	// Setup progress printer
 	progress := NewProgressPrinter(fmt.Sprintf("Starting bridge for %s", deviceAddress), "Connecting", "Running")
 	progress.Start()
@@ -144,6 +157,7 @@ func runBridge(cmd *cobra.Command, args []string) error {
 			50*time.Millisecond,
 			bridgeCharacteristicReadTimeout,
 			bridgeCharacteristicWriteTimeout,
+			scriptOpts,
 		)
 		if err != nil {
 			return nil, err
