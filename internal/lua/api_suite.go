@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/srg/blim/internal/device"
+	goble "github.com/srg/blim/internal/device/go-ble"
 	"github.com/srg/blim/internal/devicefactory"
 	"github.com/srg/blim/internal/testutils"
 	"github.com/stretchr/testify/require"
@@ -469,6 +470,11 @@ func (suite *LuaApiSuite) createLuaApi() *LuaAPI {
 	// Connect with mocked device factory (should succeed since we set up mocks in SetupSuite)
 	err := dev.Connect(ctx, opts)
 	suite.NoError(err, "Mock connection should succeed with mocked device factory")
+
+	// Disable CoreBluetooth drain delay in tests - not needed for mock connections
+	if bleConn, ok := dev.GetConnection().(*goble.BLEConnection); ok {
+		bleConn.DrainDuration = 0
+	}
 
 	return NewBLEAPI2(dev, suite.Logger)
 }

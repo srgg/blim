@@ -2246,6 +2246,52 @@ func (suite *LuaApiTestSuite) TestSleepReleasesLuaStateMutex() {
 	suite.NoError(err, "Sleep should release mutex allowing callback execution")
 }
 
+func (suite *LuaApiTestSuite) TestTwoSubscriptionsSameChar_CompeteToEachOther() {
+	// GOAL: Verify two subscriptions to the same characteristic COMPETE for notifications
+	//
+	// TEST SCENARIO: Two subscriptions to char 5678 → 4 notifications (0,1,2,3) → total=4 split between A and B, all values received exactly once
+
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		for i := 0; i < 4; i++ {
+			suite.NewPeripheralDataSimulator().
+				WithService("1234").
+				WithCharacteristic("5678", []byte{byte(i)}).
+				Simulate(false)
+		}
+	}()
+
+	script := `
+		vals_A, vals_B = {}, {}
+		blim.subscribe{
+			services = {{ service = "1234", chars = {"5678"} }},
+			Mode = "EveryUpdate",
+			Callback = function(r) table.insert(vals_A, string.byte(r.Values["5678"])) end
+		}
+		blim.subscribe{
+			services = {{ service = "1234", chars = {"5678"} }},
+			Mode = "EveryUpdate",
+			Callback = function(r) table.insert(vals_B, string.byte(r.Values["5678"])) end
+		}
+		blim.sleep(200)
+
+		-- Verify competing: total=4, both receive some
+		local total = #vals_A + #vals_B
+		assert(total == 4, "Total MUST be 4, got " .. total)
+		assert(#vals_A > 0 and #vals_B > 0, "Both MUST receive some: A=" .. #vals_A .. " B=" .. #vals_B)
+
+		-- Verify correctness: all values 0,1,2,3 received exactly once across both
+		local seen = {}
+		for _, v in ipairs(vals_A) do seen[v] = (seen[v] or 0) + 1 end
+		for _, v in ipairs(vals_B) do seen[v] = (seen[v] or 0) + 1 end
+		for i = 0, 3 do
+			assert(seen[i] == 1, "Value " .. i .. " MUST be received exactly once, got " .. (seen[i] or 0))
+		end
+	`
+	err := suite.ExecuteScript(script)
+	suite.NoError(err)
+}
+
 // TestLuaAPITestSuite runs the test suite using testify/suite
 func TestLuaAPITestSuite(t *testing.T) {
 	suitelib.Run(t, new(LuaApiTestSuite))

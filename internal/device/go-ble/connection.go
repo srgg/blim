@@ -29,6 +29,10 @@ const (
 
 	// DefaultBatchedInterval is the default rate limiting interval for batched/aggregated modes
 	DefaultBatchedInterval = 100 * time.Millisecond
+
+	// DefaultDrainDuration is the time to wait before draining CoreBluetooth cached values.
+	// CoreBluetooth delivers stale values asynchronously over ~100-200ms after SetNotify(true).
+	DefaultDrainDuration = 500 * time.Millisecond
 )
 
 // ----------------------------
@@ -60,6 +64,11 @@ type BLEConnection struct {
 	subMgr *SubscriptionManager
 	ctx    context.Context
 	cancel context.CancelCauseFunc
+
+	// DrainDuration is the time to wait before draining cached CoreBluetooth values.
+	// CoreBluetooth delivers stale cached values ~100-200ms after SetNotify(true).
+	// Default: 500ms. Set to 0 in tests to skip the drain delay.
+	DrainDuration time.Duration
 }
 
 // GetCharacteristic retrieves a characteristic by service and characteristic UUID.
@@ -119,6 +128,15 @@ func (c *BLEConnection) GetService(uuid string) (device.Service, error) {
 // ProcessCharacteristicNotification processes incoming characteristic notification data
 // This method is extracted to allow reuse in both production subscriptions and tests
 func (c *BLEConnection) ProcessCharacteristicNotification(char *BLECharacteristic, data []byte) {
+	// Diagnostic logging: trace when notifications arrive from CoreBluetooth
+	if c.logger != nil {
+		c.logger.WithFields(logrus.Fields{
+			"char": char.UUID(),
+			"len":  len(data),
+			"time": time.Now().Format("15:04:05.000"),
+		}).Debug("[BLE] notification received from CoreBluetooth")
+	}
+
 	// Create a new BLE value from the received data
 	val := newBLEValue(data)
 
@@ -140,12 +158,13 @@ func (c *BLEConnection) SimulateNotification(char *BLECharacteristic, data []byt
 
 func NewBLEConnection(logger *logrus.Logger) *BLEConnection {
 	return &BLEConnection{
-		client:   nil,
-		services: make(map[string]*BLEService),
-		subMgr:   NewSubscriptionManager(logger),
-		ctx:      context.Background(),
-		cancel:   nil,
-		logger:   logger,
+		client:        nil,
+		services:      make(map[string]*BLEService),
+		subMgr:        NewSubscriptionManager(logger),
+		ctx:           context.Background(),
+		cancel:        nil,
+		logger:        logger,
+		DrainDuration: DefaultDrainDuration,
 	}
 }
 

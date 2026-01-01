@@ -15,6 +15,21 @@ import (
 // Subscription
 // ----------------------------
 
+// drainChannel removes and releases all pending values from a BLEValue channel.
+// This is used to discard any cached values that CoreBluetooth delivers when
+// notifications are first enabled via SetNotify(true). These are stale cached
+// values from discovery, not real-time notifications.
+func drainChannel(ch chan *BLEValue) {
+	for {
+		select {
+		case val := <-ch:
+			releaseBLEValue(val) // Return to pool
+		default:
+			return // Channel empty
+		}
+	}
+}
+
 func newRecord(mode device.StreamMode) *device.Record {
 	r := &device.Record{
 		TsUs: time.Now().UnixMicro(),
@@ -210,6 +225,16 @@ func (c *BLEConnection) runSubscription(sub *Subscription) {
 		}
 	}()
 
+	// CoreBluetooth delivers cached characteristic values asynchronously over ~100-200ms
+	// after SetNotify(true) returns. Wait for delivery to complete, then drain once.
+	// DrainDuration can be set to 0 in tests to skip this delay.
+	if c.DrainDuration > 0 {
+		time.Sleep(c.DrainDuration)
+		for _, char := range sub.Chars {
+			drainChannel(char.updates)
+		}
+	}
+
 	// Create a ticker for all modes with the appropriate interval
 	var ticker *time.Ticker
 	if sub.Mode == device.StreamBatched || sub.Mode == device.StreamAggregated {
@@ -279,10 +304,11 @@ func (c *BLEConnection) runSubscription(sub *Subscription) {
 						return
 					case val := <-char.updates:
 						if c.logger != nil {
-							c.logger.WithFields(map[string]interface{}{
+							c.logger.WithFields(logrus.Fields{
 								"char": char.UUID(),
 								"len":  len(val.Data),
-							}).Debug("[subscription] BLE notification received, calling callback")
+								"time": time.Now().Format("15:04:05.000"),
+							}).Debug("[SUB] dequeue from channel")
 						}
 						record := newRecord(device.StreamEveryUpdate)
 						record.Values[char.UUID()] = val.Data
