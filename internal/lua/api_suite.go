@@ -12,8 +12,6 @@ import (
 	"time"
 
 	"github.com/srg/blim/internal/device"
-	goble "github.com/srg/blim/internal/device/go-ble"
-	"github.com/srg/blim/internal/devicefactory"
 	"github.com/srg/blim/internal/testutils"
 	"github.com/stretchr/testify/require"
 
@@ -420,19 +418,9 @@ func (suite *LuaApiSuite) SetupTest() {
 }
 
 func (suite *LuaApiSuite) createLuaApi() *LuaAPI {
-	// Create a BLE Device with mocked ble.Device
-	dev := devicefactory.NewDevice("00:00:00:00:00:01", suite.Logger)
-
-	// Set up mock connection with test services and characteristics
-	// Use context with 10s timeout for safety, but don't cancel it immediately
-	// The context lives until timeout expires or Disconnect() is called
-	ctx, _ := context.WithTimeout(context.Background(), 10*time.Second)
-
-	// Define the services and characteristics needed for tests
-	// Get services from the configured peripheral builder
+	// Build subscribe options from peripheral configuration
 	var subscribeOptions []device.SubscribeOptions
 	if suite.PeripheralBuilder != nil && len(suite.PeripheralBuilder.GetServices()) > 0 {
-		// Use the services configured in the peripheral builder
 		for _, svc := range suite.PeripheralBuilder.GetServices() {
 			var characteristics []string
 			for _, char := range svc.Characteristics {
@@ -446,35 +434,19 @@ func (suite *LuaApiSuite) createLuaApi() *LuaAPI {
 	} else {
 		// Fallback to default services if no peripheral configured
 		subscribeOptions = []device.SubscribeOptions{
-			{
-				Service:         "1234",
-				Characteristics: []string{"5678"},
-			},
-			{
-				Service:         "180d",
-				Characteristics: []string{"2a37", "2a38"},
-			},
-			{
-				Service:         "180f",
-				Characteristics: []string{"2a19"},
-			},
+			{Service: "1234", Characteristics: []string{"5678"}},
+			{Service: "180d", Characteristics: []string{"2a37", "2a38"}},
+			{Service: "180f", Characteristics: []string{"2a19"}},
 		}
 	}
 
-	opts := &device.ConnectOptions{
-		ConnectTimeout:        5 * time.Second,
-		DescriptorReadTimeout: 2 * time.Second, // Enable descriptor reading for tests
+	// Use context with 10s timeout for safety
+	ctx, _ := context.WithTimeout(context.Background(), 10*time.Second)
+
+	dev, _ := suite.ConnectDeviceWithContext(ctx, "00:00:00:00:00:01", &device.ConnectOptions{
+		DescriptorReadTimeout: 2 * time.Second,
 		Services:              subscribeOptions,
-	}
-
-	// Connect with mocked device factory (should succeed since we set up mocks in SetupSuite)
-	err := dev.Connect(ctx, opts)
-	suite.NoError(err, "Mock connection should succeed with mocked device factory")
-
-	// Disable CoreBluetooth drain delay in tests - not needed for mock connections
-	if bleConn, ok := dev.GetConnection().(*goble.BLEConnection); ok {
-		bleConn.DrainDuration = 0
-	}
+	})
 
 	return NewBLEAPI2(dev, suite.Logger)
 }

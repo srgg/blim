@@ -4,14 +4,11 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"io"
 	"os"
-	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/srg/blim/internal/device"
-	goble "github.com/srg/blim/internal/device/go-ble"
 	"github.com/srg/blim/internal/testutils"
 )
 
@@ -29,15 +26,12 @@ type CommandTestSuite struct {
 
 // ConnectDevice connects to mock device and returns cleanup function.
 // Uses TestDeviceAddress1 if address is empty.
+// DrainDuration is set to 0 via OnConnected (mocks don't have CoreBluetooth cached values to drain).
 func (s *CommandTestSuite) ConnectDevice(address string) (device.Device, func()) {
 	if address == "" {
 		address = TestDeviceAddress1
 	}
-	dev := goble.NewBLEDeviceWithAddress(address, s.Logger)
-	ctx := context.Background()
-	err := dev.Connect(ctx, &device.ConnectOptions{ConnectTimeout: 5 * time.Second})
-	s.Require().NoError(err, "connection MUST succeed")
-	return dev, func() { _ = dev.Disconnect() }
+	return s.MockBLEPeripheralSuite.ConnectDevice(address, nil)
 }
 
 // CaptureStdout executes fn while capturing stdout, returns captured output.

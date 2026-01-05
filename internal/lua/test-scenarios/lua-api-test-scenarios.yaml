@@ -32,7 +32,7 @@ test_cases:
       mode: EveryUpdate
       max_rate: 0ms
       services: []
-    expect_error_message: "no services specified in Lua subscription"
+    expect_error_message: "subscription: no services specified"
 
   - name: "Error Handling: Non-existent Service"
     subscription:

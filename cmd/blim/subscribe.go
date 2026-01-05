@@ -225,7 +225,7 @@ func runSubscribe(cmd *cobra.Command, args []string) error {
 		}
 
 		// Subscribe
-		err = conn.Subscribe(
+		_, err = conn.Subscribe(
 			subscribeOpts,
 			streamMode,
 			rate,

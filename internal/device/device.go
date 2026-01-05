@@ -143,7 +143,8 @@ type Connection interface {
 	Services() []Service
 	GetService(uuid string) (Service, error)
 	GetCharacteristic(service, uuid string) (Characteristic, error)
-	Subscribe(opts []*SubscribeOptions, pattern StreamMode, maxRate time.Duration, callback func(*Record)) error
+	Subscribe(opts []*SubscribeOptions, pattern StreamMode, maxRate time.Duration, callback func(*Record)) (cancel func(), err error)
+	SubscribeWithName(name string, opts []*SubscribeOptions, pattern StreamMode, maxRate time.Duration, callback func(*Record)) (cancel func(), err error)
 	ConnectionContext() context.Context // Returns context that's cancelled when connection errors occur
 }
 
@@ -253,4 +254,36 @@ type Record struct {
 	Values      map[string][]byte   // Single value per characteristic (EveryUpdate/Aggregated modes)
 	BatchValues map[string][][]byte // Multiple values per characteristic (Batched mode)
 	Flags       uint32
+}
+
+// Clone returns a standalone deep copy of the Record, not from any pool.
+// The returned Record is fully owned by the caller and safe to store indefinitely.
+// Use when keeping records beyond the subscription callback, as the original
+// Record's data references pooled memory that is reused after callback returns.
+func (r *Record) Clone() *Record {
+	if r == nil {
+		return nil
+	}
+	clone := &Record{
+		TsUs:  r.TsUs,
+		Seq:   r.Seq,
+		Flags: r.Flags,
+	}
+	if r.Values != nil {
+		clone.Values = make(map[string][]byte, len(r.Values))
+		for k, v := range r.Values {
+			clone.Values[k] = append([]byte(nil), v...)
+		}
+	}
+	if r.BatchValues != nil {
+		clone.BatchValues = make(map[string][][]byte, len(r.BatchValues))
+		for k, batches := range r.BatchValues {
+			clonedBatches := make([][]byte, len(batches))
+			for i, b := range batches {
+				clonedBatches[i] = append([]byte(nil), b...)
+			}
+			clone.BatchValues[k] = clonedBatches
+		}
+	}
+	return clone
 }

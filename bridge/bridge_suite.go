@@ -101,6 +101,7 @@ func (suite *BridgeSuite) ExecuteScriptWithCallbacks(
 		bridgeLuaApi := b.GetLuaAPI()
 
 		// Set bridge info in Lua API (Bridge interface has GetTTYName/GetSymlinkPath)
+		// DrainDuration is set to 0 via OnConnected (mocks don't have CoreBluetooth cached values to drain)
 		bridgeLuaApi.SetBridge(b)
 
 		suite.Logger.WithField("lua_api_ptr", fmt.Sprintf("%p", bridgeLuaApi)).Debug("BridgeSuite.ExecuteScriptWithCallbacks: SetBridge called")

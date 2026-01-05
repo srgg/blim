@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/srg/blim/internal/device"
+	"github.com/srg/blim/internal/testutils"
 	"github.com/stretchr/testify/suite"
 )
 
@@ -161,7 +162,7 @@ func (suite *ConnectionTestSuite) TestConnectionSubscriptionValidation() {
 
 		// Attempt to subscribe to a characteristic without notify/indicate support
 		// Provide a valid callback so validation logic runs (not just nil check)
-		err := suite.connection.Subscribe([]*device.SubscribeOptions{
+		_, err := suite.connection.Subscribe([]*device.SubscribeOptions{
 			{
 				Service:         "180f",
 				Characteristics: []string{"2a19"},
@@ -183,7 +184,7 @@ func (suite *ConnectionTestSuite) TestConnectionSubscriptionValidation() {
 
 		// Attempt to subscribe to all characteristics in service (some don't support notify)
 		// Provide a valid callback so validation logic runs (not just nil check)
-		err := suite.connection.Subscribe([]*device.SubscribeOptions{
+		_, err := suite.connection.Subscribe([]*device.SubscribeOptions{
 			{
 				Service: "180d",
 				// Empty Characteristics means subscribe to all in service
@@ -202,7 +203,7 @@ func (suite *ConnectionTestSuite) TestConnectionSubscriptionValidation() {
 		//
 		// TEST SCENARIO: Subscribe to notify-supporting char without Indicate flag → subscription succeeds → no error
 
-		err := suite.connection.Subscribe([]*device.SubscribeOptions{
+		_, err := suite.connection.Subscribe([]*device.SubscribeOptions{
 			{
 				Service:         "180d",
 				Characteristics: []string{"2a37"},
@@ -220,7 +221,7 @@ func (suite *ConnectionTestSuite) TestConnectionSubscriptionValidation() {
 		//
 		// TEST SCENARIO: Subscribe to indicate-supporting char with Indicate=true → subscription succeeds → no error
 
-		err := suite.connection.Subscribe([]*device.SubscribeOptions{
+		_, err := suite.connection.Subscribe([]*device.SubscribeOptions{
 			{
 				Service:         "180d",
 				Characteristics: []string{"2a3a"}, // Indicate-only characteristic
@@ -238,7 +239,7 @@ func (suite *ConnectionTestSuite) TestConnectionSubscriptionValidation() {
 		//
 		// TEST SCENARIO: Subscribe with Indicate=true to notify-only char → error "does not support indicate"
 
-		err := suite.connection.Subscribe([]*device.SubscribeOptions{
+		_, err := suite.connection.Subscribe([]*device.SubscribeOptions{
 			{
 				Service:         "180d",
 				Characteristics: []string{"2a37"}, // Notify-only characteristic
@@ -259,7 +260,7 @@ func (suite *ConnectionTestSuite) TestConnectionSubscriptionValidation() {
 		//
 		// TEST SCENARIO: Subscribe without Indicate flag to indicate-only char → error "does not support notify"
 
-		err := suite.connection.Subscribe([]*device.SubscribeOptions{
+		_, err := suite.connection.Subscribe([]*device.SubscribeOptions{
 			{
 				Service:         "180d",
 				Characteristics: []string{"2a3a"}, // Indicate-only characteristic
@@ -280,7 +281,7 @@ func (suite *ConnectionTestSuite) TestConnectionSubscriptionValidation() {
 		//
 		// TEST SCENARIO: Subscribe with Indicate=true to read-only char → error "does not support indicate"
 
-		err := suite.connection.Subscribe([]*device.SubscribeOptions{
+		_, err := suite.connection.Subscribe([]*device.SubscribeOptions{
 			{
 				Service:         "180f",
 				Characteristics: []string{"2a19"}, // Read-only characteristic (Battery Level)
@@ -301,7 +302,7 @@ func (suite *ConnectionTestSuite) TestConnectionSubscriptionValidation() {
 		//
 		// TEST SCENARIO: Subscribe with Indicate=true to char supporting both → subscription succeeds → no error
 
-		err := suite.connection.Subscribe([]*device.SubscribeOptions{
+		_, err := suite.connection.Subscribe([]*device.SubscribeOptions{
 			{
 				Service:         "180d",
 				Characteristics: []string{"2a3b"}, // Both notify and indicate
@@ -319,7 +320,7 @@ func (suite *ConnectionTestSuite) TestConnectionSubscriptionValidation() {
 		//
 		// TEST SCENARIO: Subscribe without Indicate flag to char supporting both → subscription succeeds → no error
 
-		err := suite.connection.Subscribe([]*device.SubscribeOptions{
+		_, err := suite.connection.Subscribe([]*device.SubscribeOptions{
 			{
 				Service:         "180d",
 				Characteristics: []string{"2a3b"}, // Both notify and indicate
@@ -337,9 +338,9 @@ func (suite *ConnectionTestSuite) TestConnectionSubscriptionValidation() {
 		//
 		// TEST SCENARIO: Subscribe to non-existent service → error returned → error does NOT wrap ErrUnsupported
 
-		// Provide valid callback so validation logic runs (not just nil check)
-		// Use service UUID that doesn't exist in device
-		err := suite.connection.Subscribe([]*device.SubscribeOptions{
+		// Provide a valid callback so validation logic runs (not just a nil check)
+		// Use service UUID that doesn't exist in the device
+		_, err := suite.connection.Subscribe([]*device.SubscribeOptions{
 			{
 				Service:         "ffee",
 				Characteristics: []string{"ffef"},
@@ -359,7 +360,7 @@ func (suite *ConnectionTestSuite) TestConnectionSubscriptionValidation() {
 		// TEST SCENARIO: Subscribe to non-existent characteristic → error returned → error does NOT wrap ErrUnsupported
 
 		// Provide a valid callback so validation logic runs (not just nil check)
-		err := suite.connection.Subscribe([]*device.SubscribeOptions{
+		_, err := suite.connection.Subscribe([]*device.SubscribeOptions{
 			{
 				Service:         "180d",
 				Characteristics: []string{"2aff"},
@@ -372,6 +373,317 @@ func (suite *ConnectionTestSuite) TestConnectionSubscriptionValidation() {
 		suite.Assert().NotErrorIs(err, device.ErrUnsupported, "error MUST NOT wrap ErrUnsupported for missing characteristic")
 		suite.Assert().Contains(err.Error(), "missing characteristics", "error message MUST describe missing characteristic")
 		suite.Assert().Contains(err.Error(), "2aff", "error message MUST contain characteristic UUID")
+	})
+}
+
+func (suite *ConnectionTestSuite) TestSubscriptions() {
+	// GOAL: Verify subscription notification delivery works correctly
+	//
+	// TEST SCENARIO: Various subscription patterns → notifications delivered → correct data received
+
+	// Time to wait for subscription goroutines to be ready before sending notifications
+	const subscriptionReadyDelay = 50 * time.Millisecond
+
+	suite.Run("single subscription receives notifications", func() {
+		// GOAL: Verify a single subscription receives all notifications
+		//
+		// TEST SCENARIO: Subscribe to char → send 3 notifications → callback receives all 3
+
+		suite.ResetDevice() // Clean device state - no leftover subscriptions
+		collector := testutils.NewSubscriptionRecordCollector()
+
+		// Delay notifications to ensure subscription goroutine is ready
+		// Test 1 values: 0x11, 0x12, 0x13 (unique prefix 0x1x)
+		go func() {
+			time.Sleep(subscriptionReadyDelay)
+			suite.NewPeripheralDataSimulator().AllowMultiValue().
+				WithService("180d").
+				WithCharacteristic("2a37", []byte{0x11}).
+				WithCharacteristic("2a37", []byte{0x12}).
+				WithCharacteristic("2a37", []byte{0x13}).
+				Simulate(false)
+		}()
+
+		_, err := suite.connection.Subscribe([]*device.SubscribeOptions{
+			{Service: "180d", Characteristics: []string{"2a37"}},
+		}, device.StreamEveryUpdate, 0, collector.Callback())
+		suite.Require().NoError(err, "subscription MUST succeed")
+
+		suite.Require().True(collector.WaitForCount(3, 2*time.Second), "timeout waiting for notifications")
+
+		values := collector.Values("2a37")
+		suite.Assert().Len(values, 3, "MUST receive 3 notifications")
+		suite.Assert().Equal([]byte{0x11}, values[0], "first notification MUST match")
+		suite.Assert().Equal([]byte{0x12}, values[1], "second notification MUST match")
+		suite.Assert().Equal([]byte{0x13}, values[2], "third notification MUST match")
+	})
+
+	suite.Run("multiple subscriptions same char broadcast", func() {
+		// GOAL: Verify multiple subscriptions to the same char expeteec that each receive ALL notifications (broadcast)
+		//
+		// TEST SCENARIO: Two subscriptions to char → send 4 notifications → BOTH receive all 4
+
+		suite.ResetDevice() // Clean device state - no leftover subscriptions
+		collectorA := testutils.NewSubscriptionRecordCollector()
+		collectorB := testutils.NewSubscriptionRecordCollector()
+
+		// Subscription A
+		_, err := suite.connection.Subscribe([]*device.SubscribeOptions{
+			{Service: "180d", Characteristics: []string{"2a37"}},
+		}, device.StreamEveryUpdate, 0, collectorA.Callback())
+		suite.Require().NoError(err, "subscription A MUST succeed")
+
+		// Subscription B
+		_, err = suite.connection.Subscribe([]*device.SubscribeOptions{
+			{Service: "180d", Characteristics: []string{"2a37"}},
+		}, device.StreamEveryUpdate, 0, collectorB.Callback())
+		suite.Require().NoError(err, "subscription B MUST succeed")
+
+		// Delay notifications AFTER all subscriptions are set up
+		// Test 2 values: 0x20, 0x21, 0x22, 0x23 (unique prefix 0x2x)
+		go func() {
+			time.Sleep(subscriptionReadyDelay)
+			suite.NewPeripheralDataSimulator().AllowMultiValue().
+				WithService("180d").
+				WithCharacteristic("2a37", []byte{0x20}).
+				WithCharacteristic("2a37", []byte{0x21}).
+				WithCharacteristic("2a37", []byte{0x22}).
+				WithCharacteristic("2a37", []byte{0x23}).
+				Simulate(false)
+		}()
+
+		suite.Require().True(collectorA.WaitForCount(4, 2*time.Second), "timeout waiting for subscription A")
+		suite.Require().True(collectorB.WaitForCount(4, 2*time.Second), "timeout waiting for subscription B")
+
+		// Both subscriptions MUST receive all four values (broadcast, not competing)
+		expected := [][]byte{{0x20}, {0x21}, {0x22}, {0x23}}
+		suite.Assert().ElementsMatch(expected, collectorA.Values("2a37"), "subscription A MUST have values 0,1,2,3")
+		suite.Assert().ElementsMatch(expected, collectorB.Values("2a37"), "subscription B MUST have values 0,1,2,3")
+	})
+
+	suite.Run("StreamBatched collects values", func() {
+		// GOAL: Verify StreamBatched mode collects multiple values per characteristic
+		//
+		// TEST SCENARIO: Subscribe with StreamBatched → send 3 notifications → BatchValues contains all 3
+
+		suite.ResetDevice() // Clean device state - no leftover subscriptions
+		collector := testutils.NewSubscriptionRecordCollector()
+		_, err := suite.connection.Subscribe([]*device.SubscribeOptions{
+			{Service: "180d", Characteristics: []string{"2a37"}},
+		}, device.StreamBatched, 100*time.Millisecond, collector.Callback())
+		suite.Require().NoError(err, "subscription MUST succeed")
+
+		// Send multiple notifications quickly (within a batch interval)
+		suite.NewPeripheralDataSimulator().AllowMultiValue().
+			WithService("180d").
+			WithCharacteristic("2a37", []byte{0xAA}).
+			WithCharacteristic("2a37", []byte{0xBB}).
+			WithCharacteristic("2a37", []byte{0xCC}).
+			Simulate(false)
+
+		suite.Require().True(collector.WaitForCount(1, 2*time.Second), "timeout waiting for batched values")
+
+		// Verify all 3 values received across batches
+		flattenedValues := collector.FlattenedBatchValues("2a37")
+		expected := [][]byte{{0xAA}, {0xBB}, {0xCC}}
+		suite.Assert().ElementsMatch(expected, flattenedValues, "batch MUST contain all values")
+	})
+
+	suite.Run("StreamAggregated keeps latest", func() {
+		// GOAL: Verify StreamAggregated mode keeps only the latest value per characteristic
+		//
+		// TEST SCENARIO: Subscribe with StreamAggregated → send multiple → verify only latest per char
+
+		suite.ResetDevice() // Clean device state - no leftover subscriptions
+		collector := testutils.NewSubscriptionRecordCollector()
+		_, err := suite.connection.Subscribe([]*device.SubscribeOptions{
+			{Service: "180d", Characteristics: []string{"2a37"}},
+		}, device.StreamAggregated, 100*time.Millisecond, collector.Callback())
+		suite.Require().NoError(err, "subscription MUST succeed")
+
+		// Send multiple notifications quickly
+		// Test 4 values: 0xA1, 0xA2, 0xA3 (unique prefix 0xAx)
+		suite.NewPeripheralDataSimulator().AllowMultiValue().
+			WithService("180d").
+			WithCharacteristic("2a37", []byte{0xA1}).
+			WithCharacteristic("2a37", []byte{0xA2}).
+			WithCharacteristic("2a37", []byte{0xA3}).
+			Simulate(false)
+
+		suite.Require().True(collector.WaitForCount(1, 2*time.Second), "timeout waiting for aggregated value")
+
+		// Aggregated mode should deliver the latest value (0xA3)
+		suite.Assert().Equal([]byte{0xA3}, collector.LastValue("2a37"), "MUST receive latest value")
+	})
+
+	suite.Run("all streaming modes work in parallel", func() {
+		// GOAL: Verify all three streaming modes work correctly when subscribed simultaneously
+		//
+		// TEST SCENARIO: Three subscriptions with different modes → send 5 notifications → each mode receives correct data
+
+		suite.ResetDevice() // Clean device state - no leftover subscriptions
+		everyCollector := testutils.NewSubscriptionRecordCollector()
+		batchCollector := testutils.NewSubscriptionRecordCollector()
+		aggCollector := testutils.NewSubscriptionRecordCollector()
+
+		// Subscription A: StreamEveryUpdate
+		_, err := suite.connection.Subscribe([]*device.SubscribeOptions{
+			{Service: "180d", Characteristics: []string{"2a37"}},
+		}, device.StreamEveryUpdate, 0, everyCollector.Callback())
+		suite.Require().NoError(err, "EveryUpdate subscription MUST succeed")
+
+		// Subscription B: StreamBatched
+		_, err = suite.connection.Subscribe([]*device.SubscribeOptions{
+			{Service: "180d", Characteristics: []string{"2a37"}},
+		}, device.StreamBatched, 100*time.Millisecond, batchCollector.Callback())
+		suite.Require().NoError(err, "Batched subscription MUST succeed")
+
+		// Subscription C: StreamAggregated
+		_, err = suite.connection.Subscribe([]*device.SubscribeOptions{
+			{Service: "180d", Characteristics: []string{"2a37"}},
+		}, device.StreamAggregated, 100*time.Millisecond, aggCollector.Callback())
+		suite.Require().NoError(err, "Aggregated subscription MUST succeed")
+
+		// Delay notifications to ensure all subscription goroutines are ready
+		// Test 5 values: 0x51, 0x52, 0x53, 0x54, 0x55 (unique prefix 0x5x)
+		go func() {
+			time.Sleep(subscriptionReadyDelay)
+			suite.NewPeripheralDataSimulator().AllowMultiValue().
+				WithService("180d").
+				WithCharacteristic("2a37", []byte{0x51}).
+				WithCharacteristic("2a37", []byte{0x52}).
+				WithCharacteristic("2a37", []byte{0x53}).
+				WithCharacteristic("2a37", []byte{0x54}).
+				WithCharacteristic("2a37", []byte{0x55}).
+				Simulate(false)
+		}()
+
+		// Wait for batch/aggregated timers to fire (100ms interval + buffer for delayed start)
+		time.Sleep(300 * time.Millisecond)
+
+		// Verify EveryUpdate received all notifications
+		expected := [][]byte{{0x51}, {0x52}, {0x53}, {0x54}, {0x55}}
+		suite.Assert().ElementsMatch(expected, everyCollector.Values("2a37"), "EveryUpdate MUST have all values")
+
+		// Verify Batched collected all five values across batches
+		suite.Assert().ElementsMatch(expected, batchCollector.FlattenedBatchValues("2a37"), "Batched MUST have all values")
+
+		// Verify Aggregated has the latest value
+		suite.Assert().Equal([]byte{0x55}, aggCollector.LastValue("2a37"), "Aggregated MUST have latest value (0x55)")
+	})
+}
+
+func (suite *ConnectionTestSuite) TestSubscriptionCancel() {
+	// GOAL: Verify the cancel function returned by Subscribe correctly stops notification delivery
+	//
+	// TEST SCENARIO: Various cancel scenarios → subscription stops → no further notifications received
+
+	// Time to wait for subscription goroutines to be ready before sending notifications
+	const subscriptionReadyDelay = 50 * time.Millisecond
+
+	suite.Run("cancel stops notification delivery", func() {
+		// GOAL: Verify calling cancel stops all notification delivery for that subscription
+		//
+		// TEST SCENARIO: Subscribe → receive notifications → cancel → send more → NO further notifications
+
+		suite.ResetDevice()
+		collector := testutils.NewSubscriptionRecordCollector()
+
+		// Subscribe and capture the cancel function
+		cancel, err := suite.connection.Subscribe([]*device.SubscribeOptions{
+			{Service: "180d", Characteristics: []string{"2a37"}},
+		}, device.StreamEveryUpdate, 0, collector.Callback())
+		suite.Require().NoError(err, "subscription MUST succeed")
+		suite.Require().NotNil(cancel, "cancel function MUST be returned")
+
+		// Send notifications BEFORE cancel
+		time.Sleep(subscriptionReadyDelay)
+		suite.NewPeripheralDataSimulator().AllowMultiValue().
+			WithService("180d").
+			WithCharacteristic("2a37", []byte{0xB1}).
+			WithCharacteristic("2a37", []byte{0xB2}).
+			Simulate(false)
+
+		suite.Require().True(collector.WaitForCount(2, 2*time.Second), "timeout waiting for pre-cancel notifications")
+		suite.Assert().Len(collector.Values("2a37"), 2, "MUST receive 2 notifications before cancel")
+
+		// Call cancel
+		cancel()
+		time.Sleep(100 * time.Millisecond) // Wait for goroutine to exit
+
+		countAfterCancel := collector.Count()
+
+		// Send notifications AFTER cancel - should NOT be received
+		suite.NewPeripheralDataSimulator().AllowMultiValue().
+			WithService("180d").
+			WithCharacteristic("2a37", []byte{0xB3}).
+			WithCharacteristic("2a37", []byte{0xB4}).
+			Simulate(false)
+
+		time.Sleep(200 * time.Millisecond)
+
+		suite.Assert().Equal(countAfterCancel, collector.Count(),
+			"MUST NOT receive notifications after cancel")
+	})
+
+	suite.Run("cancel is idempotent", func() {
+		// GOAL: Verify calling cancel multiple times does not panic or cause errors
+		//
+		// TEST SCENARIO: Subscribe → cancel → cancel again → no panic
+
+		suite.ResetDevice()
+
+		cancel, err := suite.connection.Subscribe([]*device.SubscribeOptions{
+			{Service: "180d", Characteristics: []string{"2a37"}},
+		}, device.StreamEveryUpdate, 0, func(r *device.Record) {})
+		suite.Require().NoError(err)
+		suite.Require().NotNil(cancel)
+
+		// Call cancel multiple times - should not panic
+		suite.NotPanics(func() {
+			cancel()
+			cancel()
+			cancel()
+		}, "multiple cancel calls MUST NOT panic")
+	})
+
+	suite.Run("cancel one subscription does not affect others", func() {
+		// GOAL: Verify canceling one subscription leaves other subscriptions active
+		//
+		// TEST SCENARIO: Two subscriptions → cancel first → second still receives notifications
+
+		suite.ResetDevice()
+		collectorA := testutils.NewSubscriptionRecordCollector()
+		collectorB := testutils.NewSubscriptionRecordCollector()
+
+		// Subscription A
+		cancelA, err := suite.connection.Subscribe([]*device.SubscribeOptions{
+			{Service: "180d", Characteristics: []string{"2a37"}},
+		}, device.StreamEveryUpdate, 0, collectorA.Callback())
+		suite.Require().NoError(err)
+
+		// Subscription B
+		_, err = suite.connection.Subscribe([]*device.SubscribeOptions{
+			{Service: "180d", Characteristics: []string{"2a37"}},
+		}, device.StreamEveryUpdate, 0, collectorB.Callback())
+		suite.Require().NoError(err)
+
+		time.Sleep(subscriptionReadyDelay)
+
+		// Cancel only subscription A
+		cancelA()
+		time.Sleep(100 * time.Millisecond)
+
+		// Send notifications - only B should receive them
+		suite.NewPeripheralDataSimulator().AllowMultiValue().
+			WithService("180d").
+			WithCharacteristic("2a37", []byte{0xC1}).
+			WithCharacteristic("2a37", []byte{0xC2}).
+			Simulate(false)
+
+		suite.Require().True(collectorB.WaitForCount(2, 2*time.Second), "subscription B MUST receive notifications")
+		suite.Assert().Equal(0, collectorA.Count(), "subscription A MUST NOT receive after cancel")
+		suite.Assert().Equal(2, collectorB.Count(), "subscription B MUST still receive notifications")
 	})
 }
 
@@ -400,7 +712,7 @@ func (suite *ConnectionTestSuite) TestConnectionErrors() {
 	})
 
 	suite.Run("subscribe while not connected returns ErrNotConnected", func() {
-		// GOAL: Verify ErrNotConnected is returned when subscribing to disconnected device
+		// GOAL: Verify ErrNotConnected is returned when subscribing to a disconnected device
 		//
 		// TEST SCENARIO: Disconnect device → attempt subscribe → ErrNotConnected returned
 
@@ -409,7 +721,7 @@ func (suite *ConnectionTestSuite) TestConnectionErrors() {
 		suite.Require().NoError(err, "disconnect MUST succeed")
 
 		// Attempt to subscribe while disconnected
-		err = suite.connection.Subscribe([]*device.SubscribeOptions{
+		_, err = suite.connection.Subscribe([]*device.SubscribeOptions{
 			{
 				Service:         "180d",
 				Characteristics: []string{"2a37"},

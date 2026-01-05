@@ -3,13 +3,11 @@
 package device_test
 
 import (
-	"context"
 	"reflect"
 	"time"
 	"unsafe"
 
 	"github.com/srg/blim/internal/device"
-	"github.com/srg/blim/internal/devicefactory"
 	"github.com/srg/blim/internal/testutils"
 )
 
@@ -26,24 +24,19 @@ func (suite *DeviceTestSuite) ensureConnected() {
 		return
 	}
 
-	suite.device = devicefactory.NewDevice("AA:BB:CC:DD:EE:FF", suite.Logger)
-	err := suite.device.Connect(context.Background(), &device.ConnectOptions{
-		ConnectTimeout:        5 * time.Second,
+	suite.device, _ = suite.ConnectDevice("AA:BB:CC:DD:EE:FF", &device.ConnectOptions{
 		DescriptorReadTimeout: 1 * time.Second,
 	})
-
-	if err != nil {
-		err := suite.device.Disconnect()
-		if err != nil {
-			suite.Logger.Error(err, "Failed to disconnect device after connect failure")
-		}
-
-		suite.device = nil
-	}
-
-	suite.Require().NoError(err, "MUST connect successfully")
 	suite.connection = suite.device.GetConnection()
 	suite.Require().NotNil(suite.connection, "connection MUST not be nil")
+}
+
+// NewPeripheralDataSimulator returns a simulator with connection provider pre-configured.
+func (suite *DeviceTestSuite) NewPeripheralDataSimulator() *testutils.PeripheralDataSimulatorBuilder {
+	return suite.MockBLEPeripheralSuite.NewPeripheralDataSimulator().
+		WithConnectionProvider(func() device.Connection {
+			return suite.connection
+		})
 }
 
 // SetupTest configures a default peripheral with Generic Access (1800), Battery Service (180F), and Heart Rate Service (180D)
@@ -87,6 +80,13 @@ func (suite *DeviceTestSuite) TearDownTest() {
 	suite.device = nil
 	suite.connection = nil
 	suite.MockBLEPeripheralSuite.TearDownTest()
+}
+
+// ResetDevice tears down and recreates the device/connection for a clean state.
+// Use this in subtests that need isolation from previous subscriptions.
+func (suite *DeviceTestSuite) ResetDevice() {
+	suite.TearDownTest()
+	suite.SetupTest()
 }
 
 // setDeviceConnectionToNil uses unsafe reflection to set the device's connection field to nil.

@@ -317,7 +317,7 @@ func (suite *SubscribeTestSuite) TestNotificationFlow() {
 			// Capture stdout for entire notification flow (subscribe → simulate → wait)
 			var subscribeErr, simErr error
 			capturedOutput := suite.CaptureStdout(func() {
-				subscribeErr = conn.Subscribe(
+				_, subscribeErr = conn.Subscribe(
 					tt.subscribeOpts,
 					device.StreamEveryUpdate,
 					0,

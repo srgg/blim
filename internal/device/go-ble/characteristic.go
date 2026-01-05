@@ -49,6 +49,7 @@ type BLEValue struct {
 	Data  []byte
 	Seq   uint64
 	Flags uint32
+	Char  *BLECharacteristic // Source characteristic for fan-out routing
 }
 
 var valuePool = sync.Pool{
@@ -57,7 +58,21 @@ var valuePool = sync.Pool{
 
 var globalBLESeq uint64
 
+// NewBLEValue creates a standalone BLEValue, NOT from the pool.
+// The returned value is fully owned by the caller with no pool lifecycle.
+// Use for tests or cases where pool management overhead isn't needed.
 func newBLEValue(data []byte) *BLEValue {
+	return &BLEValue{
+		TsUs: time.Now().UnixMicro(),
+		Seq:  atomic.AddUint64(&globalBLESeq, 1),
+		Data: append([]byte(nil), data...),
+	}
+}
+
+// newPooledBLEValue creates a BLEValue from the pool.
+// The returned value MUST be released via release() when done.
+// Use for hot-path notification handling where pooling benefits apply.
+func newPooledBLEValue(data []byte) *BLEValue {
 	v := valuePool.Get().(*BLEValue)
 	v.TsUs = time.Now().UnixMicro()
 	v.Seq = atomic.AddUint64(&globalBLESeq, 1)
@@ -70,15 +85,57 @@ func newBLEValue(data []byte) *BLEValue {
 	return v
 }
 
-func releaseBLEValue(v *BLEValue) {
+// Clone returns a standalone deep copy of the BLEValue, NOT from the pool.
+// The returned value is fully owned by the caller and safe to store indefinitely.
+// Use when keeping values beyond the subscription callback, as pooled BLEValue
+// objects are reused after release.
+func (v *BLEValue) Clone() *BLEValue {
+	if v == nil {
+		return nil
+	}
+	return &BLEValue{
+		TsUs:  v.TsUs,
+		Seq:   v.Seq,
+		Flags: v.Flags,
+		Char:  v.Char,
+		Data:  append([]byte(nil), v.Data...),
+	}
+}
+
+// poolCopy returns a copy of the BLEValue from the pool.
+// The returned value MUST be released via release() when done.
+// Use for transient copies (e.g., fan-out broadcast) where pooling benefits apply.
+func (v *BLEValue) poolCopy() *BLEValue {
+	cpy := valuePool.Get().(*BLEValue)
+	cpy.TsUs = v.TsUs
+	cpy.Seq = v.Seq
+	cpy.Flags = v.Flags
+	cpy.Char = v.Char
+	if cap(cpy.Data) < len(v.Data) {
+		cpy.Data = make([]byte, len(v.Data))
+	}
+	cpy.Data = cpy.Data[:len(v.Data)]
+	copy(cpy.Data, v.Data)
+	return cpy
+}
+
+// release returns this BLEValue to the pool for reuse.
+// After calling release, the value MUST NOT be used - all fields become invalid.
+// Only call on values obtained from newPooledBLEValue() or poolCopy().
+// Calling release on standalone values (from NewBLEValue or Clone) is safe but wasteful.
+func (v *BLEValue) release() {
+	if v == nil {
+		return
+	}
 	// Reset fields to zero to avoid keeping stale data
 	v.TsUs = 0
 	v.Seq = 0
 	v.Flags = 0
+	v.Char = nil
 
 	// Prevent keeping large buffers in the pool
 	if cap(v.Data) > MaxPooledBufferSize {
-		// Buffer too large, reallocate to default size
+		// Buffer too large, reallocate to the default size
 		v.Data = make([]byte, 0, DefaultBLEValueCapacity)
 	} else {
 		// Normal size, just reset length
@@ -96,7 +153,7 @@ func drainAndReleaseChannel(ch chan *BLEValue) {
 			if v == nil {
 				return
 			}
-			releaseBLEValue(v)
+			v.release()
 		default:
 			return
 		}
@@ -120,6 +177,12 @@ type BLECharacteristic struct {
 	closed  atomic.Bool
 	mu      sync.RWMutex
 	subs    []func(*BLEValue)
+
+	// Fan-out: dynamic registry of subscriber channels for broadcast delivery
+	subChannels   []chan *BLEValue
+	subChannelsMu sync.Mutex
+	fanOutCtx     context.Context
+	fanOutCancel  context.CancelFunc
 }
 
 func NewCharacteristic(c *ble.Characteristic, buffer int, conn *BLEConnection, descriptors []device.Descriptor) *BLECharacteristic {
@@ -139,10 +202,22 @@ func NewCharacteristic(c *ble.Characteristic, buffer int, conn *BLEConnection, d
 }
 
 func (c *BLECharacteristic) EnqueueValue(v *BLEValue) {
+	// Recover from panic if channel closes between closed check and send.
+	// This race window cannot be eliminated without mutex overhead, but is harmless -
+	// it only occurs during shutdown when late BLE callbacks arrive.
+	defer func() {
+		if r := recover(); r != nil {
+			if c.connection != nil && c.connection.logger != nil {
+				c.connection.logger.Debug("[EnqueueValue] OK: channel closed during send (late callback during shutdown)")
+			}
+			v.release()
+		}
+	}()
+
 	// Check if the channel is closed before attempting to send
 	// This prevents panic from sending on a closed channel if BLE callbacks fire after shutdown
 	if c.closed.Load() {
-		releaseBLEValue(v)
+		v.release()
 		return
 	}
 
@@ -159,12 +234,12 @@ func (c *BLECharacteristic) EnqueueValue(v *BLEValue) {
 		// Channel full, drop the oldest
 		old := <-c.updates
 		old.Flags |= FlagDropped
-		releaseBLEValue(old)
+		old.release()
 		// Recheck closed before second send (could have closed while we were dropping)
 		if !c.closed.Load() {
 			c.updates <- v
 		} else {
-			releaseBLEValue(v)
+			v.release()
 		}
 	}
 }

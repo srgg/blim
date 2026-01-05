@@ -710,7 +710,8 @@ func (api *LuaAPI) executeSubscription(config *LuaSubscriptionTable) error {
 	}
 
 	// Call Subscribe on the connection
-	return api.device.GetConnection().Subscribe(opts, pattern, maxRate, callback)
+	_, err := api.device.GetConnection().Subscribe(opts, pattern, maxRate, callback)
+	return err
 }
 
 // callPTYDataCallback calls the Lua callback function when PTY data arrives

@@ -46,6 +46,11 @@ var DeviceFactory = func() (ble.Device, error) {
 	return darwin.NewDevice()
 }
 
+// OnConnected is called after a BLE connection is successfully established.
+// Can be used for connection configuration, logging, or instrumentation.
+// Must be set before any connections are made; do not modify during operation.
+var OnConnected func(*BLEConnection)
+
 // ----------------------------
 // BLE Connection
 // ----------------------------
@@ -137,8 +142,9 @@ func (c *BLEConnection) ProcessCharacteristicNotification(char *BLECharacteristi
 		}).Debug("[BLE] notification received from CoreBluetooth")
 	}
 
-	// Create a new BLE value from the received data
-	val := newBLEValue(data)
+	// Create a new BLE value from the received data (from pool for hot-path performance)
+	val := newPooledBLEValue(data)
+	val.Char = char
 
 	// Update the characteristic's value
 	char.SetValue(data)
@@ -330,16 +336,19 @@ func (c *BLEConnection) Connect(ctx context.Context, address string, opts *devic
 	// Monitor go-ble client Disconnected() channel (Darwin-specific)
 	// This detects when CoreBluetooth reports a disconnection
 	if darwinClient, ok := client.(interface{ Disconnected() <-chan struct{} }); ok {
+		// Capture in closure to avoid race with Disconnect() clearing c.cancel/c.ctx
+		cancelFunc, connCtx := c.cancel, c.ctx
+
 		groutine.Go(context.Background(), "ble-connection-monitor", func(monitorCtx context.Context) {
 			select {
 			case <-darwinClient.Disconnected():
 				if c.logger != nil {
 					c.logger.Warn("CoreBluetooth reported disconnection, cancelling connection context")
 				}
-				if c.cancel != nil {
-					c.cancel(device.ErrNotConnected)
+				if cancelFunc != nil {
+					cancelFunc(device.ErrNotConnected)
 				}
-			case <-c.ctx.Done():
+			case <-connCtx.Done():
 				// Connection context already canceled, exit monitor
 			}
 		})
@@ -358,6 +367,12 @@ func (c *BLEConnection) Connect(ctx context.Context, address string, opts *devic
 		"services":        len(c.services),
 		"characteristics": totalChars,
 	}).Info("BLE device connected successfully")
+
+	// Invoke connection callback if set (used for configuration, logging, instrumentation)
+	if OnConnected != nil {
+		OnConnected(c)
+	}
+
 	return nil
 }
 

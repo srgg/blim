@@ -3,6 +3,7 @@
 package testutils
 
 import (
+	"context"
 	"fmt"
 	"testing"
 	"time"
@@ -96,12 +97,21 @@ func (s *MockBLEPeripheralSuite) SetupSuite() {
 	// Save the original BLE device factory for restoration
 	s.OriginalDeviceFactory = goble.DeviceFactory
 
+	// Configure all test connections: disable drain delay for mock connections.
+	// Real BLE connections coild wait DrainDuration (~500ms) after enabling notifications to let
+	// CoreBluetooth delivers stale cached values, then drains them. Mock connections don't
+	// have this behavior, so setting to 0 avoids unnecessary delays in tests.
+	goble.OnConnected = func(c *goble.BLEConnection) {
+		c.DrainDuration = 0
+	}
+
 	// Use t.Cleanup for automatic resource restoration (testify/suite best practice)
 	s.T().Cleanup(func() {
 		if s.OriginalDeviceFactory != nil {
 			goble.DeviceFactory = s.OriginalDeviceFactory
 			s.Logger.Debug("Device factory restored via t.Cleanup")
 		}
+		goble.OnConnected = nil
 	})
 
 	s.Logger.Debug("Suite setup completed")
@@ -149,6 +159,31 @@ func (s *MockBLEPeripheralSuite) TearDownTest() {
 // Device factory restoration is handled automatically via t.Cleanup().
 func (s *MockBLEPeripheralSuite) TearDownSuite() {
 	s.Logger.Debug("Suite teardown completed")
+}
+
+// ConnectDeviceWithContext creates a mock BLE device, connects it with the given context, and configures it for testing.
+// DrainDuration is set to 0 via OnConnected (mocks don't have CoreBluetooth cached values to drain).
+// Returns the device and a cleanup function that disconnects the device.
+// If opts is nil or ConnectTimeout is 0, defaults to 5 seconds.
+func (s *MockBLEPeripheralSuite) ConnectDeviceWithContext(ctx context.Context, address string, opts *device.ConnectOptions) (device.Device, func()) {
+	if opts == nil {
+		opts = &device.ConnectOptions{}
+	}
+	if opts.ConnectTimeout == 0 {
+		opts.ConnectTimeout = 5 * time.Second
+	}
+
+	dev := goble.NewBLEDeviceWithAddress(address, s.Logger)
+	err := dev.Connect(ctx, opts)
+	s.Require().NoError(err, "connection MUST succeed")
+
+	return dev, func() { _ = dev.Disconnect() }
+}
+
+// ConnectDevice creates a mock BLE device, connects it, and configures it for testing.
+// Convenience wrapper for ConnectDeviceWithContext using context.Background().
+func (s *MockBLEPeripheralSuite) ConnectDevice(address string, opts *device.ConnectOptions) (device.Device, func()) {
+	return s.ConnectDeviceWithContext(context.Background(), address, opts)
 }
 
 // WithPeripheral returns the peripheral builder for fluent configuration.
