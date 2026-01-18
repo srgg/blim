@@ -104,6 +104,165 @@ function blim.short_uuid(uuid)
 end
 
 
+--- Write to characteristic and wait for notification/indication response (sync, blocking).
+-- @param opts.service Service UUID (required)
+-- @param opts.write_char Char to write to (required)
+-- @param opts.data Bytes to write (required)
+-- @param opts.match Matcher function(data) -> -1/0/1 (required)
+--   -1 = operation failed (returns data, "failed")
+--    0 = not our response, keep waiting
+--    1 = success (returns data, nil)
+-- @param opts.notify_char Char to receive from (default: write_char)
+-- @param opts.write_response Write with response (default: true)
+-- @param opts.indicate Use indicate vs notify (default: false)
+-- @param opts.timeout Timeout in ms (default: 5000)
+-- @return data, err
+--   data, nil       = success (matcher returned 1)
+--   data, "failed"  = operation failed (matcher returned -1)
+--   nil, "timeout"  = no matching response within timeout
+--   nil, "write: <msg>"       = write to characteristic failed
+--   nil, "subscribe: <msg>"   = subscription setup failed
+--   nil, "characteristic not found: <uuid>" = char not available
+function blim.write_receive(opts)
+    -- Validate required arguments
+    if not opts then return nil, "opts required" end
+    if not opts.service then return nil, "service required" end
+    if not opts.write_char then return nil, "write_char required" end
+    if not opts.data then return nil, "data required" end
+    if not opts.match then return nil, "match required" end
+    if type(opts.match) ~= "function" then return nil, "match must be function" end
+
+    local notify_char = opts.notify_char or opts.write_char
+
+    -- Resolve characteristic before subscribing (fail fast)
+    local char = blim.characteristic(opts.service, opts.write_char)
+    if not char then
+        return nil, "characteristic not found: " .. opts.write_char
+    end
+
+    local status = nil  -- nil=pending, false=failed, true=succeeded
+    local response_data = nil
+
+    -- Create temporary subscription
+    local cancel, sub_err = blim.subscribe{
+        services = {{
+            service = opts.service,
+            chars = { notify_char },
+            indicate = opts.indicate or false
+        }},
+        Callback = function(record)
+            local data = record.Values[notify_char]
+            if data then
+                local m = opts.match(data)
+                if m == 1 then
+                    status = true
+                    response_data = data
+                elseif m == -1 then
+                    status = false
+                    response_data = data
+                end
+                -- m == 0: not our response, keep waiting
+            end
+        end
+    }
+    if sub_err then
+        return nil, "subscribe: " .. sub_err
+    end
+
+    -- Write data
+    local _, write_err = char.write(opts.data, opts.write_response ~= false)
+    if write_err then
+        cancel()
+        return nil, "write: " .. write_err
+    end
+
+    -- Poll until status set or timeout
+    local poll_ms = 50
+    local iterations = math.ceil((opts.timeout or 5000) / poll_ms)
+    for i = 1, iterations do
+        blim.sleep(poll_ms)
+        if status ~= nil then break end
+    end
+
+    cancel()
+
+    if status == nil then
+        return nil, "timeout"
+    elseif status == false then
+        return response_data, "failed"
+    end
+    return response_data, nil
+end
+
+
+--- Write to characteristic and subscribe for response (async, non-blocking).
+-- Returns immediately after write. User's callback receives (cancel, data).
+-- User MUST call cancel() when done to cleanup subscription.
+-- @param opts.service Service UUID (required)
+-- @param opts.write_char Char to write to (required)
+-- @param opts.data Bytes to write (required)
+-- @param opts.callback User callback: callback(cancel, data) - user MUST call cancel() to cleanup
+-- @param opts.notify_char Char to receive from (default: write_char)
+-- @param opts.write_response Write with response (default: true)
+-- @param opts.indicate Use indicate vs notify (default: false)
+-- @return err (nil on success)
+--   nil = success, subscription active
+--   "subscribe: <msg>" = subscription failed
+--   "write: <msg>" = write failed
+--   "characteristic not found: <uuid>" = char unavailable
+function blim.write_receive_async(opts)
+    -- Validate required arguments
+    if not opts then return "opts required" end
+    if not opts.service then return "service required" end
+    if not opts.write_char then return "write_char required" end
+    if not opts.data then return "data required" end
+    if not opts.callback then return "callback required" end
+    if type(opts.callback) ~= "function" then return "callback must be function" end
+
+    local notify_char = opts.notify_char or opts.write_char
+
+    -- Resolve characteristic before subscribing (fail fast)
+    local char = blim.characteristic(opts.service, opts.write_char)
+    if not char then
+        return "characteristic not found: " .. opts.write_char
+    end
+
+    -- Use table indirection to avoid closure timing issue:
+    -- cancel is assigned AFTER subscribe returns, but callback may fire
+    -- before assignment completes. Table reference allows late binding.
+    local state = { cancel = function() end }  -- no-op placeholder
+
+    local cancel_fn, sub_err = blim.subscribe{
+        services = {{
+            service = opts.service,
+            chars = { notify_char },
+            indicate = opts.indicate or false
+        }},
+        Callback = function(record)
+            local data = record.Values[notify_char]
+            if data then
+                opts.callback(state.cancel, data)
+            end
+        end
+    }
+
+    if sub_err then
+        return "subscribe: " .. sub_err
+    end
+
+    state.cancel = cancel_fn  -- Now safe - callback will see real cancel
+
+    -- Write data
+    local _, write_err = char.write(opts.data, opts.write_response ~= false)
+    if write_err then
+        cancel_fn()
+        return "write: " .. write_err
+    end
+
+    return nil  -- Success
+end
+
+
 -- Export as global blim
 _G.blim = blim
 

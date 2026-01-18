@@ -842,6 +842,167 @@ if attempt >= max_attempts then
 end
 ```
 
+### `blim.write_receive(opts)` → `data, err`
+Writes to a characteristic and waits for a notification/indication response (synchronous, blocking).
+
+This is the primary pattern for request-response BLE protocols where you write a command and wait for the device to respond via indication or notification on the same (or different) characteristic.
+
+**Parameters (opts table):**
+- `service` (string, required) - Service UUID
+- `write_char` (string, required) - Characteristic UUID to write to
+- `data` (string, required) - Bytes to write
+- `match` (function, required) - Matcher function `function(data) -> number`:
+  - Return `1` = success, stop waiting
+  - Return `-1` = operation failed, stop waiting
+  - Return `0` = not our response, keep waiting
+- `notify_char` (string, optional) - Characteristic to receive from (default: `write_char`)
+- `write_response` (boolean, optional) - Write with response (default: `true`)
+- `indicate` (boolean, optional) - Use indicate vs notify (default: `false`)
+- `timeout` (number, optional) - Timeout in milliseconds (default: `5000`)
+
+**Returns:**
+- `data, nil` - Success (matcher returned `1`)
+- `data, "failed"` - Operation failed (matcher returned `-1`)
+- `nil, "timeout"` - No matching response within timeout
+- `nil, "write: <msg>"` - Write to characteristic failed
+- `nil, "subscribe: <msg>"` - Subscription setup failed
+- `nil, "characteristic not found: <uuid>"` - Characteristic not available
+
+**Example: Command with result code**
+```lua
+-- Send command and wait for response with result byte
+local channel = 0x00  -- Front channel
+local opcode = 0x01   -- CENTER command
+
+local data, err = blim.write_receive{
+    service = "ff40",
+    write_char = "ff42",
+    data = string.char(channel, opcode),
+    indicate = true,
+    timeout = 2000,
+    match = function(d)
+        if #d < 3 then return 0 end  -- Incomplete, keep waiting
+        if d:byte(1) ~= channel or d:byte(2) ~= opcode then return 0 end
+        -- Check result byte: 0x00 = OK, anything else = error
+        return d:byte(3) == 0x00 and 1 or -1
+    end,
+}
+
+if err then
+    print("Command failed:", err)
+elseif data then
+    local result = data:byte(3)
+    print("Command result:", result)
+end
+```
+
+**Example: Different write and notify characteristics**
+```lua
+-- Write to control char, receive response on status char
+local data, err = blim.write_receive{
+    service = "ff30",
+    write_char = "ff31",      -- Control characteristic
+    notify_char = "ff32",     -- Status characteristic (different)
+    data = "\x01\x00",
+    indicate = false,         -- Use notify (not indicate)
+    timeout = 3000,
+    match = function(d)
+        if #d < 1 then return 0 end
+        return d:byte(1) == 0x00 and 1 or -1
+    end,
+}
+```
+
+### `blim.write_receive_async(opts)` → `err`
+Writes to a characteristic and subscribes for response (asynchronous, non-blocking).
+
+Returns immediately after write. The callback receives each notification/indication until cancelled. **User MUST call `cancel()` to cleanup the subscription.**
+
+Use this for long-running operations where you don't want to block the main script (e.g., animated sequences, continuous tests).
+
+**Parameters (opts table):**
+- `service` (string, required) - Service UUID
+- `write_char` (string, required) - Characteristic UUID to write to
+- `data` (string, required) - Bytes to write
+- `callback` (function, required) - Callback `function(cancel, data)`:
+  - `cancel` - Function to call when done (MUST be called to cleanup)
+  - `data` - Received notification/indication bytes
+- `notify_char` (string, optional) - Characteristic to receive from (default: `write_char`)
+- `write_response` (boolean, optional) - Write with response (default: `true`)
+- `indicate` (boolean, optional) - Use indicate vs notify (default: `false`)
+
+**Returns:**
+- `nil` - Success, subscription active
+- `"subscribe: <msg>"` - Subscription failed
+- `"write: <msg>"` - Write failed
+- `"characteristic not found: <uuid>"` - Characteristic unavailable
+
+**Example: Long-running command with callback**
+```lua
+-- Start a sweep animation (takes several seconds)
+local channel = 0xFF  -- All channels
+local opcode = 0x04   -- SWEEP command
+
+local err = blim.write_receive_async{
+    service = "ff40",
+    write_char = "ff42",
+    data = string.char(channel, opcode),
+    indicate = true,
+    callback = function(cancel, data)
+        if #data < 3 then return end  -- Not our response, keep waiting
+        if data:byte(1) ~= channel or data:byte(2) ~= opcode then return end
+
+        -- Got our response
+        local result = data:byte(3)
+        print("Sweep complete, result:", result)
+        cancel()  -- IMPORTANT: cleanup subscription
+    end,
+}
+
+if err then
+    print("Failed to start sweep:", err)
+end
+
+-- Script continues immediately while sweep runs in background
+print("Sweep started, doing other work...")
+```
+
+**Example: Continuous monitoring until condition**
+```lua
+-- Monitor status updates until error detected
+local sample_count = 0
+
+local err = blim.write_receive_async{
+    service = "ff40",
+    write_char = "ff47",
+    data = "\x01",  -- Start monitoring command
+    callback = function(cancel, data)
+        sample_count = sample_count + 1
+        local status = data:byte(1)
+        print("Status update #" .. sample_count .. ":", status)
+
+        -- Stop on error flag
+        if bit.band(status, 0x08) ~= 0 then
+            print("Error detected, stopping")
+            cancel()
+        end
+
+        -- Or stop after max samples
+        if sample_count >= 100 then
+            print("Max samples reached")
+            cancel()
+        end
+    end,
+}
+```
+
+**When to use sync vs async:**
+
+| Pattern | Use Case |
+|---------|----------|
+| `write_receive` (sync) | Short commands with immediate response (< 2s) |
+| `write_receive_async` (async) | Long operations, animations, continuous monitoring |
+
 ---
 
 ## TODO: Upcoming API Extensions
@@ -904,6 +1065,7 @@ Both approaches will coexist - use whichever fits your use case.
 **✅ Available features:**
 - ✅ **Read operations** - `handle.read()` reads characteristic values on demand
 - ✅ **Write operations** - `handle.write(data, [with_response])` writes to characteristics with or without acknowledgment
+- ✅ **Write-receive patterns** - `blim.write_receive()` (sync) and `blim.write_receive_async()` (async) for request-response BLE protocols
 - ✅ **Value parsing** - `handle.parse(value)` parses known characteristic types (e.g., Appearance)
 - ✅ **Characteristic inspection** - `blim.characteristic()` returns metadata (UUID, service, properties, descriptors, has_parser)
 - ✅ **Service listing** - `blim.list()` enumerates all GATT services and characteristics
