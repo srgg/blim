@@ -10,19 +10,14 @@ import (
 	"github.com/stretchr/testify/suite"
 )
 
-// UUIDResolveTestSuite tests UUID resolution functions with mock BLE peripheral
+// UUIDResolveTestSuite device_test UUID resolution functions with mock BLE peripheral
 type UUIDResolveTestSuite struct {
 	CommandTestSuite
 }
 
-// SetupSuite runs once before all tests in the suite
+// SetupSuite runs once before all device_test in the suite
 func (suite *UUIDResolveTestSuite) SetupSuite() {
 	suite.CommandTestSuite.SetupSuite()
-}
-
-// TearDownSuite runs once after all tests in the suite
-func (suite *UUIDResolveTestSuite) TearDownSuite() {
-	suite.CommandTestSuite.TearDownSuite()
 }
 
 // SetupTest runs before each test in the suite
@@ -32,13 +27,13 @@ func (suite *UUIDResolveTestSuite) SetupTest() {
 	// - 2a37 in BOTH 180d and 1800 (ambiguity detection)
 	// - 2902 (CCCD) in multiple characteristics (descriptor ambiguity)
 	// - 2901 only in 2a19 (unique descriptor resolution)
-	suite.WithPeripheral().
-		FromJSON(testutils.AmbiguousCharPeripheral).
-		Build()
+	suite.GivenPeripheral(func(builder *testutils.PeripheralDeviceBuilder) {
+		builder.
+			FromJSON(testutils.AmbiguousCharPeripheral)
+	})
 
 	suite.CommandTestSuite.SetupTest()
 }
-
 
 // =============================================================================
 // doResolveTarget Tests
@@ -128,8 +123,7 @@ func (suite *UUIDResolveTestSuite) TestDoResolveTarget() {
 		},
 	}
 
-	dev, cleanup := suite.ConnectDevice(TestDeviceAddress2)
-	defer cleanup()
+	dev := suite.Connect(TestDeviceAddress2)
 	conn := dev.GetConnection()
 
 	for _, tt := range tests {
@@ -234,8 +228,7 @@ func (suite *UUIDResolveTestSuite) TestResolveCharacteristics() {
 		},
 	}
 
-	dev, cleanup := suite.ConnectDevice(TestDeviceAddress2)
-	defer cleanup()
+	dev := suite.Connect(TestDeviceAddress2)
 	conn := dev.GetConnection()
 
 	for _, tt := range tests {
@@ -312,8 +305,7 @@ func (suite *UUIDResolveTestSuite) TestResolveDescriptor() {
 		},
 	}
 
-	dev, cleanup := suite.ConnectDevice(TestDeviceAddress2)
-	defer cleanup()
+	dev := suite.Connect(TestDeviceAddress2)
 	conn := dev.GetConnection()
 
 	for _, tt := range tests {

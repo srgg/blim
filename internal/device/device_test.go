@@ -5,28 +5,25 @@
 package device_test
 
 import (
+	"testing"
+	"time"
+
 	"github.com/srg/blim/internal/device"
 	"github.com/srg/blim/internal/devicefactory"
 	"github.com/srg/blim/internal/testutils"
 	"github.com/srgg/testify/depend"
-	"testing"
-	"time"
 )
 
-// DeviceBasicTestSuite tests device functionality that doesn't require device connection
+// DeviceBasicTestSuite tests device functionality that doesn't require an active connection.
 type DeviceBasicTestSuite struct {
-	DeviceTestSuite
+	DeviceTestSuite2
 
-	//suite.Suite
-	helper *testutils.TestHelper
-	ja     *testutils.JSONAsserter
+	ja *testutils.JSONAsserter
 }
 
 func (suite *DeviceBasicTestSuite) SetupTest() {
-	suite.helper = testutils.NewTestHelper(suite.T())
 	suite.ja = testutils.NewJSONAsserter(suite.T())
-
-	suite.DeviceTestSuite.SetupTest()
+	suite.DeviceTestSuite2.SetupTest()
 }
 
 func (suite *DeviceBasicTestSuite) TestNewDevice() {
@@ -35,7 +32,7 @@ func (suite *DeviceBasicTestSuite) TestNewDevice() {
 	// TEST SCENARIO: Advertisement with complete data → device created → all fields match expected values
 
 	suite.Run("creates device with all advertisement data", func() {
-		dev := testutils.CreateMockAdvertisementFromJSON(`{
+		dev := testutils.NewAdvertisementBuilder().FromJSON(`{
 			"name": "Test Device",
 			"address": "AA:BB:CC:DD:EE:FF",
 			"rssi": -45,
@@ -44,7 +41,7 @@ func (suite *DeviceBasicTestSuite) TestNewDevice() {
 			"serviceData": {"180F":[100]},
 			"txPower": 4,
 			"connectable": true
-		}`).BuildDevice(suite.helper.Logger)
+		}`).BuildDevice(suite.Logger)
 
 		actualJSON := testutils.DeviceToJSON(dev)
 
@@ -64,7 +61,7 @@ func (suite *DeviceBasicTestSuite) TestNewDevice() {
 	})
 
 	suite.Run("handles missing optional data", func() {
-		dev := testutils.CreateMockAdvertisementFromJSON(`{
+		dev := testutils.NewAdvertisementBuilder().FromJSON(`{
 			"name": null,
 			"address": "11:22:33:44:55:66",
 			"rssi": -70,
@@ -73,7 +70,7 @@ func (suite *DeviceBasicTestSuite) TestNewDevice() {
 			"services": null,
 			"txPower": null,
 			"connectable": false
-		}`).BuildDevice(suite.helper.Logger)
+		}`).BuildDevice(suite.Logger)
 
 		actualJSON := testutils.DeviceToJSON(dev)
 		suite.ja.Assert(actualJSON, `{
@@ -99,7 +96,7 @@ func (suite *DeviceBasicTestSuite) TestDeviceUpdate() {
 	// Note: All BLE advertisement fields must be present because device creation
 	// always calls all advertisement methods. Empty values ([], {}, null) represent
 	// the default behavior when real BLE devices don't advertise that data.
-	initialAdv := testutils.CreateMockAdvertisementFromJSON(`{
+	initialAdv := testutils.NewAdvertisementBuilder().FromJSON(`{
 			"name": "Initial Name",
 			"address": "AA:BB:CC:DD:EE:FF",
 			"rssi": -50,
@@ -110,11 +107,11 @@ func (suite *DeviceBasicTestSuite) TestDeviceUpdate() {
 			"connectable": true
 		}`).Build()
 
-	dev := devicefactory.NewDeviceFromAdvertisement(initialAdv, suite.helper.Logger)
+	dev := devicefactory.NewDeviceFromAdvertisement(initialAdv, suite.Logger)
 	initialAdv.AssertExpectations(suite.T())
 
 	// Create update advertisement
-	updateAdv := testutils.CreateMockAdvertisementFromJSON(`{
+	updateAdv := testutils.NewAdvertisementBuilder().FromJSON(`{
 		"name": "Updated Name",
 		"rssi": -40,
 		"manufacturerData": [2, 3],
@@ -206,7 +203,7 @@ func (suite *DeviceBasicTestSuite) TestExtractNameFromManufacturerData() {
 
 	for _, tt := range tests {
 		suite.Run(tt.name, func() {
-			adv := testutils.CreateMockAdvertisementFromJSON(`{
+			adv := testutils.NewAdvertisementBuilder().FromJSON(`{
 				"name": null,
 				"address": "AA:BB:CC:DD:EE:FF",
 				"rssi": -50,
@@ -217,7 +214,7 @@ func (suite *DeviceBasicTestSuite) TestExtractNameFromManufacturerData() {
 				"connectable": true
 			}`, testutils.MustJSON(tt.manufData)).Build()
 
-			dev := devicefactory.NewDeviceFromAdvertisement(adv, suite.helper.Logger)
+			dev := devicefactory.NewDeviceFromAdvertisement(adv, suite.Logger)
 
 			suite.Assert().Equal(tt.expectedName, dev.Name())
 		})
@@ -261,7 +258,7 @@ func (suite *DeviceBasicTestSuite) TestNameResolutionPrecedence() {
 
 	for _, tt := range tests {
 		suite.Run(tt.name, func() {
-			adv := testutils.CreateMockAdvertisementFromJSON(`{
+			adv := testutils.NewAdvertisementBuilder().FromJSON(`{
 				"name": %s,
 				"address": "AA:BB:CC:DD:EE:FF",
 				"rssi": -50,
@@ -275,7 +272,7 @@ func (suite *DeviceBasicTestSuite) TestNameResolutionPrecedence() {
 				testutils.MustJSON(tt.manufData),
 			).Build()
 
-			dev := devicefactory.NewDeviceFromAdvertisement(adv, suite.helper.Logger)
+			dev := devicefactory.NewDeviceFromAdvertisement(adv, suite.Logger)
 			suite.Assert().Equal(tt.expectedName, dev.Name(), tt.description)
 		})
 	}
@@ -287,7 +284,7 @@ func (suite *DeviceBasicTestSuite) TestNameUpdateBehavior() {
 	// TEST SCENARIO: Device created with extracted name → LocalName advertised → name updated → subsequent updates preserve LocalName
 
 	// Create an initial device with no name
-	adv1 := testutils.CreateMockAdvertisementFromJSON(`{
+	adv1 := testutils.NewAdvertisementBuilder().FromJSON(`{
 				"name": "",
 				"address": "AA:BB:CC:DD:EE:FF",
 				"rssi": -50,
@@ -298,11 +295,11 @@ func (suite *DeviceBasicTestSuite) TestNameUpdateBehavior() {
 				"connectable": true
 			}`, testutils.MustJSON([]byte{0x00, 0x01, 'E', 'x', 't', 'r', 'a', 'c', 't', 'e', 'd'})).Build()
 
-	dev := devicefactory.NewDeviceFromAdvertisement(adv1, suite.helper.Logger)
+	dev := devicefactory.NewDeviceFromAdvertisement(adv1, suite.Logger)
 	suite.Assert().Equal("Extracted", dev.Name(), "Should extract name from manufacturer data initially")
 
 	// Update with advertisement that has LocalName
-	adv2 := testutils.CreateMockAdvertisementFromJSON(`{
+	adv2 := testutils.NewAdvertisementBuilder().FromJSON(`{
 				"name": "OfficialName",
 				"rssi": -45,
 				"manufacturerData": %s,
@@ -320,7 +317,7 @@ func (suite *DeviceBasicTestSuite) TestNameUpdateBehavior() {
 	}`)
 
 	// Update with an advertisement that has no LocalName
-	adv3 := testutils.CreateMockAdvertisementFromJSON(`{
+	adv3 := testutils.NewAdvertisementBuilder().FromJSON(`{
 				"name": "",
 				"rssi": -40,
 				"manufacturerData": %s,
@@ -347,12 +344,13 @@ func (suite *DeviceBasicTestSuite) TestDeviceWriteToCharacteristicErrors() {
 		//
 		// TEST SCENARIO: Disconnect device → attempt characteristic write → ErrNotConnected returned
 
+		dev := suite.Connect("12")
 		// Get writable characteristic while connected
-		char, err := suite.connection.GetCharacteristic("180d", "2a39")
+		char, err := dev.GetConnection().GetCharacteristic("180d", "2a39")
 		suite.Require().NoError(err, "MUST find characteristic")
 
 		// Disconnect the device
-		err = suite.device.Disconnect()
+		err = dev.Disconnect()
 		suite.Require().NoError(err, "disconnect MUST succeed")
 
 		// Attempt to write while disconnected
@@ -368,7 +366,9 @@ func (suite *DeviceBasicTestSuite) TestDeviceWriteToCharacteristicErrors() {
 		//
 		// TEST SCENARIO: Get invalid characteristic UUID → NotFoundError returned → error identifies missing resource
 
-		_, err := suite.connection.GetCharacteristic("180d", "fffe")
+		dev := suite.Connect("12")
+
+		_, err := dev.GetConnection().GetCharacteristic("180d", "fffe")
 
 		suite.Assert().Error(err, "GetCharacteristic MUST fail for non-existent characteristic")
 
@@ -379,8 +379,8 @@ func (suite *DeviceBasicTestSuite) TestDeviceWriteToCharacteristicErrors() {
 	})
 }
 
-// Note: Appearance is now accessed as a regular characteristic (UUID 0x2A01 in GAP service 0x1800)
-// Tests for appearance should use the characteristic API tests
+// Note: Appearance is now accessed as a regular characteristic (UUID 0x2A01 in GAP service 0x1800).
+// Tests for appearance parsing are in CharacteristicTestSuite.TestWellKnownCharacteristicParsers.
 
 func (suite *DeviceBasicTestSuite) TestParsedManufacturerData() {
 	// GOAL: Verify device properly parses and exposes manufacturer data via DeviceInfo interface
@@ -436,7 +436,7 @@ func (suite *DeviceBasicTestSuite) TestParsedManufacturerData() {
 		for _, tt := range tests {
 			suite.Run(tt.name, func() {
 				// Create a device from advertisement with Blim manufacturer data
-				adv := testutils.CreateMockAdvertisementFromJSON(`{
+				adv := testutils.NewAdvertisementBuilder().FromJSON(`{
 					"name": "Blim Device",
 					"address": "AA:BB:CC:DD:EE:FF",
 					"rssi": -50,
@@ -447,7 +447,7 @@ func (suite *DeviceBasicTestSuite) TestParsedManufacturerData() {
 					"connectable": true
 				}`, testutils.MustJSON(tt.manufData)).Build()
 
-				dev := devicefactory.NewDeviceFromAdvertisement(adv, suite.helper.Logger)
+				dev := devicefactory.NewDeviceFromAdvertisement(adv, suite.Logger)
 
 				// Verify raw manufacturer data is stored
 				suite.Assert().Equal(tt.manufData, dev.ManufacturerData(), "raw manufacturer data MUST match")
@@ -489,7 +489,7 @@ func (suite *DeviceBasicTestSuite) TestParsedManufacturerData() {
 		for _, tt := range tests {
 			suite.Run(tt.name, func() {
 				// Create device from advertisement with unknown manufacturer data
-				adv := testutils.CreateMockAdvertisementFromJSON(`{
+				adv := testutils.NewAdvertisementBuilder().FromJSON(`{
 					"name": "Unknown Device",
 					"address": "AA:BB:CC:DD:EE:FF",
 					"rssi": -50,
@@ -500,7 +500,7 @@ func (suite *DeviceBasicTestSuite) TestParsedManufacturerData() {
 					"connectable": true
 				}`, testutils.MustJSON(tt.manufData)).Build()
 
-				dev := devicefactory.NewDeviceFromAdvertisement(adv, suite.helper.Logger)
+				dev := devicefactory.NewDeviceFromAdvertisement(adv, suite.Logger)
 
 				// Verify raw manufacturer data is stored
 				suite.Assert().Equal(tt.manufData, dev.ManufacturerData(), "raw manufacturer data MUST match")
@@ -517,7 +517,7 @@ func (suite *DeviceBasicTestSuite) TestParsedManufacturerData() {
 		//
 		// TEST SCENARIO: Create device without manufacturer data → ParsedManufacturerData() returns nil
 
-		adv := testutils.CreateMockAdvertisementFromJSON(`{
+		adv := testutils.NewAdvertisementBuilder().FromJSON(`{
 			"name": "No Manuf Data",
 			"address": "AA:BB:CC:DD:EE:FF",
 			"rssi": -50,
@@ -528,7 +528,7 @@ func (suite *DeviceBasicTestSuite) TestParsedManufacturerData() {
 			"connectable": true
 		}`).Build()
 
-		dev := devicefactory.NewDeviceFromAdvertisement(adv, suite.helper.Logger)
+		dev := devicefactory.NewDeviceFromAdvertisement(adv, suite.Logger)
 
 		// Verify no manufacturer data
 		suite.Assert().Nil(dev.ManufacturerData(), "ManufacturerData() MUST return nil")

@@ -12,7 +12,7 @@
 **Example justification in GOAL:**
 ```go
 // GOAL: Verify subscription error handling with network timeout
-//       (separate from TestSubscriptionInvalidUUID which tests validation errors)
+//       (separate from TestSubscriptionInvalidUUID which device_test validation errors)
 ```
 
 ## 2. Test Documentation Format

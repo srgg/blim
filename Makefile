@@ -3,7 +3,7 @@
 # Quick start:
 #   make           - Build and test
 #   make build     - Build binary
-#   make test      - Run tests
+#   make test      - Run device_test
 #   make help      - Show all targets
 
 # Shell configuration for safer execution
@@ -87,7 +87,7 @@ clean: clean-mocks clean-docs clean-bledb clean-depend
 # Code Generation
 #------------------------------------------------------------------------------
 
-## generate: Generate all code (BLE database, mocks, depend tests, etc.)
+## generate: Generate all code (BLE database, mocks, depend device_test, etc.)
 .PHONY: generate
 generate: $(BLEDB_GENERATED) generate-mocks generate-depend
 
@@ -143,7 +143,7 @@ clean-depend:
 # Testing
 #------------------------------------------------------------------------------
 
-## test: Run all tests (use TEST=<pattern> for specific tests)
+## test: Run all device_test (use TEST=<pattern> for specific device_test)
 .PHONY: test
 test: generate
 	@if [ -z "$(TEST)" ]; then \
@@ -154,7 +154,7 @@ test: generate
 		$(GO) test $(GO_TEST_FLAGS) -v -run $(TEST) ./... 2>&1; \
 	fi
 
-## test-race: Run tests with race detector
+## test-race: Run device_test with race detector
 .PHONY: test-race
 test-race: generate
 	@echo "Running tests with race detection..."
@@ -176,7 +176,7 @@ coverage: test-coverage
 	@echo "Coverage summary:"
 	@$(GO) tool cover -func=$(COVERAGE_DIR)/coverage.out
 
-## test-cmd: Run command (CLI) package tests only
+## test-cmd: Run command (CLI) package device_test only
 .PHONY: test-cmd
 test-cmd: generate
 	@echo "Running CLI tests..."

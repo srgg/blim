@@ -92,13 +92,13 @@ type ErrorCallback func(err error)
 type ReadCallback func(data []byte)
 
 // PTYOptions configures PTY creation with fine-grained control over behavior.
-// Zero values use sensible defaults (see DefaultPollTimeoutMs constant).
+// Zero values use sensible defaults (see Default* constants).
 type PTYOptions struct {
-	ReadCap       int            // Ring buffer capacity for data read from PTY (bytes from slave)
-	WriteCap      int            // Ring buffer capacity for data written to PTY (bytes to slave)
+	ReadCap       int            // Ring buffer capacity for data read from PTY (0 = DefaultReadCap)
+	WriteCap      int            // Ring buffer capacity for data written to PTY (0 = DefaultWriteCap)
 	Logger        *logrus.Logger // Optional logger (nil = no-op logger)
 	OnError       ErrorCallback  // Optional callback for critical loop failures
-	PollTimeoutMs int            // Poll timeout in milliseconds (0 = use DefaultPollTimeoutMs)
+	PollTimeoutMs int            // Poll timeout in milliseconds (0 = DefaultPollTimeoutMs)
 }
 
 // PTY provides a non-blocking interface to pseudo-terminal devices.
@@ -129,6 +129,12 @@ const (
 	// and CPU usage (shorter = more responsive but higher CPU usage when idle).
 	// Exported so users can reference it when creating custom PTYOptions.
 	DefaultPollTimeoutMs = 50
+
+	// DefaultReadCap is the default ring buffer capacity for data read from PTY (bytes).
+	DefaultReadCap = 4096
+
+	// DefaultWriteCap is the default ring buffer capacity for data written to PTY (bytes).
+	DefaultWriteCap = 4096
 )
 
 // noopLogger is a shared logger instance that discards all output.
@@ -265,14 +271,24 @@ func NewPtyWithOptions(opts *PTYOptions) (PTY, error) {
 		pollTimeout = DefaultPollTimeoutMs
 	}
 
+	readCap := opts.ReadCap
+	if readCap == 0 {
+		readCap = DefaultReadCap
+	}
+
+	writeCap := opts.WriteCap
+	if writeCap == 0 {
+		writeCap = DefaultWriteCap
+	}
+
 	p := &ringPTY{
 		logger:        logger,
 		pty:           master,
 		ptyFd:         int(master.Fd()),
 		tty:           slave, // keep slave open for PTY state
 		ttyName:       slaveName,
-		writeBuf:      ringbuffer.New(opts.WriteCap),
-		readBuf:       ringbuffer.New(opts.ReadCap),
+		writeBuf:      ringbuffer.New(writeCap),
+		readBuf:       ringbuffer.New(readCap),
 		ctx:           ctx,
 		cancel:        cancel,
 		onError:       opts.OnError,
@@ -331,10 +347,12 @@ func (p *ringPTY) ttyWriteLoop() {
 			}
 		}
 
-		// Read bytes from the ring buffer (bulk operation)
-		n, err := p.writeBuf.TryRead(buf)
+		// Read bytes from the ring buffer (blocking read)
+		// Using Read() instead of TryRead() because IsEmpty() already confirmed data exists.
+		// This preserves the invariant: "Observed data will be consumed."
+		n, err := p.writeBuf.Read(buf)
 		if err != nil && !errors.Is(err, ringbuffer.ErrIsEmpty) {
-			p.logger.Warnf("writeLoop TryRead error: %v", err)
+			p.logger.Warnf("writeLoop Read error: %v", err)
 			continue
 		}
 		if n == 0 {

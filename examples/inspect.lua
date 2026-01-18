@@ -356,7 +356,7 @@ local function output_json(data)
     end
 
     -- Simplify manufacturer_data for JSON output if no parsed_value
-    -- (Backward compatibility: tests expect simple string when no parser available)
+    -- (Backward compatibility: device_test expect simple string when no parser available)
     if data.device.manufacturer_data and not data.device.manufacturer_data.parsed_value then
         data.device.manufacturer_data = data.device.manufacturer_data.value
     end

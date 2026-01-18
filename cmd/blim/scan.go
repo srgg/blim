@@ -125,14 +125,15 @@ func runScan(cmd *cobra.Command, args []string) error {
 		BlockList:       scanBlockList,
 	}
 
+	out := cmd.OutOrStdout()
 	if scanWatch {
-		return runWatchMode(s, scanOpts, cfg, logger)
+		return runWatchMode(out, s, scanOpts, cfg, logger)
 	}
 
-	return runSingleScan(s, scanOpts, cfg, logger)
+	return runSingleScan(out, s, scanOpts, cfg, logger)
 }
 
-func runSingleScan(scanner *scanner.Scanner, opts *scanner.ScanOptions, cfg *scanConfig, logger *logrus.Logger) error {
+func runSingleScan(w io.Writer, scanner *scanner.Scanner, opts *scanner.ScanOptions, cfg *scanConfig, logger *logrus.Logger) error {
 	if cfg == nil {
 		cfg = defaultScanConfig()
 	}
@@ -156,7 +157,7 @@ func runSingleScan(scanner *scanner.Scanner, opts *scanner.ScanOptions, cfg *sca
 	go func() {
 		select {
 		case <-sigCh:
-			fmt.Println("\nCtrl+C pressed, cancelling scan...")
+			fmt.Fprintln(w, "\nCtrl+C pressed, cancelling scan...")
 			cancel()
 		case <-ctx.Done():
 			// Scan completed or timed out - exit cleanly
@@ -175,10 +176,10 @@ func runSingleScan(scanner *scanner.Scanner, opts *scanner.ScanOptions, cfg *sca
 		logger.WithError(err).Error("scan failed")
 		return err
 	}
-	return displayDevicesTableFromMap(devices, cfg)
+	return displayDevicesTableFromMap(w, devices, cfg)
 }
 
-func runWatchMode(s *scanner.Scanner, opts *scanner.ScanOptions, cfg *scanConfig, logger *logrus.Logger) error {
+func runWatchMode(w io.Writer, s *scanner.Scanner, opts *scanner.ScanOptions, cfg *scanConfig, logger *logrus.Logger) error {
 	// Scan until interrupted by the user.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -191,7 +192,7 @@ func runWatchMode(s *scanner.Scanner, opts *scanner.ScanOptions, cfg *scanConfig
 	go func() {
 		select {
 		case <-sigCh:
-			fmt.Println("\nCtrl+C pressed, cancelling scan...")
+			fmt.Fprintln(w, "\nCtrl+C pressed, cancelling scan...")
 			cancel()
 		case <-ctx.Done():
 			// Context cancelled (error path) - exit cleanly
@@ -220,8 +221,8 @@ func runWatchMode(s *scanner.Scanner, opts *scanner.ScanOptions, cfg *scanConfig
 			return err
 		}
 
-		clearScreen()
-		return displayDevicesTableFromMap(devicesMap, cfg)
+		clearScreen(w)
+		return displayDevicesTableFromMap(w, devicesMap, cfg)
 	}
 
 	// Add a ticker to check the timeout periodically and avoid channel starvation
@@ -274,14 +275,9 @@ func runWatchMode(s *scanner.Scanner, opts *scanner.ScanOptions, cfg *scanConfig
 	}
 }
 
-type deviceWithTime struct {
-	device.DeviceInfo
-	lastSeen time.Time
-}
-
-func displayDevicesTableFromMap(entries map[string]scanner.DeviceEntry, cfg *scanConfig) error {
+func displayDevicesTableFromMap(w io.Writer, entries map[string]scanner.DeviceEntry, cfg *scanConfig) error {
 	if len(entries) == 0 {
-		fmt.Println("No devices discovered")
+		fmt.Fprintln(w, "No devices discovered")
 		return nil
 	}
 
@@ -303,19 +299,18 @@ func displayDevicesTableFromMap(entries map[string]scanner.DeviceEntry, cfg *sca
 		for i, d := range devList {
 			infoList[i] = d.Device
 		}
-		return displayDevicesJSON(infoList)
+		return displayDevicesJSON(w, infoList)
 	default:
-		return displayDevicesTable(devList)
+		return displayDevicesTable(w, devList)
 	}
 }
 
-func displayDevicesTable(entries []scanner.DeviceEntry) error {
-	var base io.Writer = os.Stdout
-	if base == nil {
-		base = io.Discard
+func displayDevicesTable(w io.Writer, entries []scanner.DeviceEntry) error {
+	if w == nil {
+		w = io.Discard
 	}
-	w := tabwriter.NewWriter(base, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "NAME\tADDRESS\tRSSI\tSERVICES\tLAST SEEN")
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "NAME\tADDRESS\tRSSI\tSERVICES\tLAST SEEN")
 
 	for _, e := range entries {
 		dev := e.Device
@@ -336,15 +331,14 @@ func displayDevicesTable(entries []scanner.DeviceEntry) error {
 
 		lastSeen := time.Since(e.LastSeen).Truncate(time.Second)
 
-		fmt.Fprintf(w, "%s\t%s\t%d dBm\t%s\t%s ago\n",
+		fmt.Fprintf(tw, "%s\t%s\t%d dBm\t%s\t%s ago\n",
 			name, dev.Address(), dev.RSSI(), services, lastSeen)
 	}
 
-	return w.Flush()
+	return tw.Flush()
 }
 
-func displayDevicesJSON(devices []device.DeviceInfo) error {
-	var w io.Writer = os.Stdout
+func displayDevicesJSON(w io.Writer, devices []device.DeviceInfo) error {
 	if w == nil {
 		w = io.Discard
 	}
@@ -353,8 +347,7 @@ func displayDevicesJSON(devices []device.DeviceInfo) error {
 	return encoder.Encode(devices)
 }
 
-func clearScreen() {
-	var w io.Writer = os.Stdout
+func clearScreen(w io.Writer) {
 	if w == nil {
 		w = io.Discard
 	}

@@ -79,6 +79,11 @@ var (
 	ErrTimeout      = errors.New("timeout")
 	ErrUnsupported  = errors.New("unsupported")
 	ErrBluetoothOff = errors.New("bluetooth is turned off")
+
+	// ErrConnectionLost indicates the BLE connection was unexpectedly lost during operation.
+	// This is distinct from device.ErrNotConnected, which indicates an attempt to use
+	// a device that was never connected or was already disconnected.
+	ErrConnectionLost = errors.New("connection lost")
 )
 
 // IsConnectionState reports whether err is a ConnectionError with the given state
@@ -143,8 +148,8 @@ type Connection interface {
 	Services() []Service
 	GetService(uuid string) (Service, error)
 	GetCharacteristic(service, uuid string) (Characteristic, error)
-	Subscribe(opts []*SubscribeOptions, pattern StreamMode, maxRate time.Duration, callback func(*Record)) (cancel func(), err error)
-	SubscribeWithName(name string, opts []*SubscribeOptions, pattern StreamMode, maxRate time.Duration, callback func(*Record)) (cancel func(), err error)
+	Subscribe(opts []*SubscribeOptions, pattern StreamMode, maxRate time.Duration, drainDuration time.Duration, callback func(*Record)) (cancel func(), err error)
+	SubscribeWithName(name string, opts []*SubscribeOptions, pattern StreamMode, maxRate time.Duration, drainDuration time.Duration, callback func(*Record)) (cancel func(), err error)
 	ConnectionContext() context.Context // Returns context that's cancelled when connection errors occur
 }
 
@@ -247,13 +252,26 @@ const (
 	StreamAggregated
 )
 
-// Record represents a subscription notification record
+type RecordMeta struct {
+	TsUs  int64
+	Seq   uint64
+	Flags uint32
+}
+
 type Record struct {
-	TsUs        int64
-	Seq         uint64
-	Values      map[string][]byte   // Single value per characteristic (EveryUpdate/Aggregated modes)
-	BatchValues map[string][][]byte // Multiple values per characteristic (Batched mode)
-	Flags       uint32
+	RecordMeta
+
+	Values      map[string][]byte        // Single value per characteristic (EveryUpdate/Aggregated modes)
+	BatchValues map[string][][]byte      // Multiple values per characteristic (Batched mode)
+	Meta        map[string][]*RecordMeta // Metadata per each characteristic (Batched and Aggregate modes)
+}
+
+func cloneSlice[T any](src []T, copyFn func(T) T) []T {
+	dst := make([]T, len(src))
+	for i, v := range src {
+		dst[i] = copyFn(v)
+	}
+	return dst
 }
 
 // Clone returns a standalone deep copy of the Record, not from any pool.
@@ -264,26 +282,44 @@ func (r *Record) Clone() *Record {
 	if r == nil {
 		return nil
 	}
-	clone := &Record{
-		TsUs:  r.TsUs,
-		Seq:   r.Seq,
-		Flags: r.Flags,
+
+	// ---- local helpers (fully inlined by compiler) ----
+
+	cloneBytes := func(b []byte) []byte {
+		return append([]byte(nil), b...)
 	}
-	if r.Values != nil {
+
+	cloneRecordMeta := func(m *RecordMeta) *RecordMeta {
+		c := *m
+		return &c
+	}
+
+	// ---- clone record ----
+
+	clone := &Record{
+		RecordMeta: r.RecordMeta,
+	}
+
+	if len(r.Values) != 0 {
 		clone.Values = make(map[string][]byte, len(r.Values))
 		for k, v := range r.Values {
-			clone.Values[k] = append([]byte(nil), v...)
+			clone.Values[k] = cloneBytes(v)
 		}
 	}
-	if r.BatchValues != nil {
+
+	if len(r.BatchValues) != 0 {
 		clone.BatchValues = make(map[string][][]byte, len(r.BatchValues))
 		for k, batches := range r.BatchValues {
-			clonedBatches := make([][]byte, len(batches))
-			for i, b := range batches {
-				clonedBatches[i] = append([]byte(nil), b...)
-			}
-			clone.BatchValues[k] = clonedBatches
+			clone.BatchValues[k] = cloneSlice(batches, cloneBytes)
 		}
 	}
+
+	if len(r.Meta) != 0 {
+		clone.Meta = make(map[string][]*RecordMeta, len(r.Meta))
+		for k, metas := range r.Meta {
+			clone.Meta[k] = cloneSlice(metas, cloneRecordMeta)
+		}
+	}
+
 	return clone
 }

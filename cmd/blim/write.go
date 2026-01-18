@@ -132,7 +132,7 @@ func runWrite(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	fmt.Println("Write successful")
+	fmt.Fprintln(cmd.OutOrStdout(), "Write successful")
 	return nil
 }
 

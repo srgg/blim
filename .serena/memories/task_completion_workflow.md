@@ -10,7 +10,7 @@ make lint           # Run linter to catch issues
 
 ### 2. Testing Requirements
 ```bash
-make test           # Run all unit tests
+make test           # Run all unit device_test
 make test-race      # Check for race conditions
 make test-coverage  # Ensure coverage is maintained
 ```

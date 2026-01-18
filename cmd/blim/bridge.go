@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -49,7 +48,7 @@ var (
 	bridgeCharacteristicReadTimeout  time.Duration
 	bridgeCharacteristicWriteTimeout time.Duration
 	bridgeLuaScript                  string
-	bridgeLuaPaths                   []string
+	bridgeLuaLibs                    []string
 	bridgeSymlink                    string
 )
 
@@ -60,7 +59,7 @@ func init() {
 	bridgeCmd.Flags().DurationVar(&bridgeCharacteristicReadTimeout, "characteristic-read-timeout", 0, "Timeout for characteristic read operations (0 = use default: 5s)")
 	bridgeCmd.Flags().DurationVar(&bridgeCharacteristicWriteTimeout, "characteristic-write-timeout", 0, "Timeout for characteristic write operations (0 = use default: 5s)")
 	bridgeCmd.Flags().StringVar(&bridgeLuaScript, "script", "", "Lua script file with ble_to_tty() and tty_to_ble() functions")
-	bridgeCmd.Flags().StringSliceVar(&bridgeLuaPaths, "lua-path", nil, "Additional directories to search for Lua modules (can be specified multiple times)")
+	bridgeCmd.Flags().StringSliceVar(&bridgeLuaLibs, "lua-lib", nil, "Additional directories to search for Lua modules (validated, can be specified multiple times)")
 	bridgeCmd.Flags().StringVar(&bridgeSymlink, "symlink", "", "Create a symlink to the PTY device (e.g., /tmp/ble-device)")
 }
 
@@ -99,13 +98,13 @@ func runBridge(cmd *cobra.Command, args []string) error {
 	// Load script content before creating the callback
 	var scriptContent string
 	if bridgeLuaScript != "" {
-		// Read the custom script file
-		logger.WithField("file", bridgeLuaScript).Info("Loading custom Lua script")
-		content, err := os.ReadFile(bridgeLuaScript)
+		// Read the custom script file (supports project-root-relative paths starting with "/")
+		logger.Infof("Loading custom Lua script from file %s", bridgeLuaScript)
+		content, err := lua.LoadScriptFromPath(bridgeLuaScript)
 		if err != nil {
 			return fmt.Errorf("failed to read script file: %w", err)
 		}
-		scriptContent = string(content)
+		scriptContent = content
 	} else {
 		// Use default bridge script
 		logger.Info("Using default bridge script")
@@ -114,14 +113,14 @@ func runBridge(cmd *cobra.Command, args []string) error {
 
 	var scriptArgs map[string]string
 
-	// Configure Lua module search paths:
+	// Configure secure Lua module loading paths:
 	// - Script's directory is automatically included (enables require() for co-located modules)
-	// - Additional paths from --lua-path flag are prepended to search order
+	// - Additional paths from --lua-lib flag are validated and added to allowed paths
 	var scriptOpts *lua.ScriptOptions
-	if bridgeLuaScript != "" || len(bridgeLuaPaths) > 0 {
+	if bridgeLuaScript != "" || len(bridgeLuaLibs) > 0 {
 		scriptOpts = &lua.ScriptOptions{
-			ScriptPath:         bridgeLuaScript,
-			AdditionalLuaPaths: bridgeLuaPaths,
+			ScriptPath:   bridgeLuaScript,
+			LibraryPaths: bridgeLuaLibs,
 		}
 	}
 
@@ -130,94 +129,23 @@ func runBridge(cmd *cobra.Command, args []string) error {
 	progress.Start()
 	defer progress.Stop()
 
-	// Bridge callback - executes the Lua script with output streaming
-	bridgeCallback := func(b bridge.Bridge) (any, error) {
+	err = bridge.RunCliBridge(ctx, progress.Callback(), bridge.CLIBridgeConfig{
+		DeviceAddress:  deviceAddress,
+		ConnectTimeout: bridgeConnectTimeout,
+		Symlink:        bridgeSymlink,
 
-		// HACK: Create an output drainer to capture output from the Lua API,
-		// 		even though the script execution completed, the bridge is keeping the Lua State open, using it by
-		// 		calling the Lua callbacks until the bridge is canceled.
-		drainer := lua.NewOutputDrainer(ctx, b.GetLuaAPI().OutputChannel(), logger, os.Stdout, os.Stderr)
+		ScriptContent: scriptContent,
+		ScriptArgs:    scriptArgs,
+		ScriptOpts:    scriptOpts,
+		Stdout:        os.Stdout,
+		Stderr:        os.Stderr,
+		Logger:        logger,
+		ServiceUUID:   serviceUUID,
 
-		defer func() {
-			// Stop the drainer after a script completes
-			drainer.Cancel()
-			drainer.Wait()
-		}()
-
-		// Execute the Lua script
-		err = lua.ExecuteDeviceScriptWithOutput(
-			ctx,
-			nil,
-			b.GetLuaAPI(),
-			logger,
-			scriptContent,
-			scriptArgs,
-			nil,
-			nil,
-			50*time.Millisecond,
-			bridgeCharacteristicReadTimeout,
-			bridgeCharacteristicWriteTimeout,
-			scriptOpts,
-		)
-		if err != nil {
-			return nil, err
-		}
-
-		// Script executed successfully, and subscriptions are active
-		// Monitor connection context for errors (e.g., disconnection)
-		dev := b.GetLuaAPI().GetDevice()
-		conn := dev.GetConnection()
-		if conn == nil {
-			return nil, fmt.Errorf("no connection available")
-		}
-
-		connCtx := conn.ConnectionContext()
-		if connCtx == nil {
-			return nil, fmt.Errorf("connection context not available")
-		}
-
-		logger.WithField("context_ptr", fmt.Sprintf("%p", connCtx)).Info("Bridge monitoring started, waiting for connection errors or shutdown...")
-
-		select {
-		case <-connCtx.Done():
-			// Connection context canceled - check the cause
-			cause := context.Cause(connCtx)
-
-			if cause != nil {
-				if errors.Is(cause, device.ErrNotConnected) {
-					// Connection lost
-					return nil, ErrConnectionLost
-				}
-
-				// Connection context canceled with unknown cause")
-				return nil, fmt.Errorf("connection error: %w", cause)
-			}
-			// Context canceled without cause (normal shutdown)
-			return nil, nil
-		case <-ctx.Done():
-			logger.Info("Bridge shutting down...")
-			return nil, nil
-		}
-	}
-
-	// Run the bridge with callback
-	_, err = bridge.RunDeviceBridge(
-		ctx,
-		&bridge.BridgeOptions{
-			BleAddress:               deviceAddress,
-			BleConnectTimeout:        bridgeConnectTimeout,
-			BleDescriptorReadTimeout: bridgeDescriptorReadTimeout,
-			BleSubscribeOptions: []device.SubscribeOptions{
-				{
-					Service: serviceUUID,
-				},
-			},
-			Logger:         logger,
-			TTYSymlinkPath: bridgeSymlink,
-		},
-		progress.Callback(),
-		bridgeCallback,
-	)
+		CharacteristicReadTimeout:  bridgeCharacteristicReadTimeout,
+		CharacteristicWriteTimeout: bridgeCharacteristicWriteTimeout,
+		DescriptorReadTimeout:      bridgeDescriptorReadTimeout,
+	})
 
 	return err
 }

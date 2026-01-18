@@ -6,7 +6,7 @@ import (
 	"github.com/srg/blim/internal/device/go-ble"
 )
 
-// DeviceFactory creates a device.Scanner instances for BLE scanning operations.
+// DeviceFactory creates device.Scanner instances for BLE scanning operations.
 // This is a variable so that it can be overridden in tests.
 var DeviceFactory = func() (device.Scanner, error) {
 	return goble.NewScanner()

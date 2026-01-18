@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"runtime/debug"
 	"strings"
 	"time"
@@ -105,11 +103,12 @@ func (l FairLock) Unlock() {
 
 // LuaEngine represents the Lua engine with full output capture
 type LuaEngine struct {
-	state      *lua.State
-	stateMutex FairLock // Channel-based fair lock (FIFO) to prevent starvation
-	logger     *logrus.Logger
-	scriptCode string
-	outputChan *RingChannel[LuaOutputRecord] // ring buffer for Lua outputs
+	state        *lua.State
+	stateMutex   FairLock // Channel-based fair lock (FIFO) to prevent starvation
+	logger       *logrus.Logger
+	scriptCode   string
+	outputChan   *RingChannel[LuaOutputRecord] // ring buffer for Lua outputs
+	secureLoader *SecureModuleLoader           // Singleton: manages allowed paths for require()
 }
 
 // NewLuaEngine creates a new Lua engine with full stdout/stderr capture using the default channel capacity
@@ -416,8 +415,58 @@ func (e *LuaEngine) OutputChannel() <-chan LuaOutputRecord {
 	return e.outputChan.C()
 }
 
-// parseLuaError extracts detailed info from Lua error messages
-func (e *LuaEngine) parseLuaError(errType, source string) *LuaError {
+// parseLuaErrorFromErr extracts detailed info from a *lua.LuaError using type assertion.
+// This preserves the rich stack trace information from the golua library.
+func (e *LuaEngine) parseLuaErrorFromErr(errType string, err error) *LuaError {
+	luaErr, ok := err.(*lua.LuaError)
+	if !ok {
+		// Fallback: parse from error string
+		return e.parseLuaErrorFromString(errType, err.Error())
+	}
+
+	result := &LuaError{
+		Type:    errType,
+		Message: luaErr.Error(),
+	}
+
+	// Extract line and source from stack trace
+	// Skip C frames (CurrentLine = -1), find the first Lua frame
+	stackTrace := luaErr.StackTrace()
+	var stackLines []string
+	for _, entry := range stackTrace {
+		if entry.CurrentLine > 0 && result.Line == 0 {
+			result.Line = entry.CurrentLine
+			result.Source = entry.ShortSource
+		}
+		// Build stack trace string
+		if entry.CurrentLine > 0 {
+			stackLines = append(stackLines, fmt.Sprintf("  at %s (%s:%d)", entry.Name, entry.ShortSource, entry.CurrentLine))
+		} else if entry.Name != "" {
+			stackLines = append(stackLines, fmt.Sprintf("  at %s (%s)", entry.Name, entry.ShortSource))
+		}
+	}
+	if len(stackLines) > 0 {
+		result.StackTrace = strings.Join(stackLines, "\n")
+	}
+
+	// Clean up the message by removing the line prefix if present
+	// Format: "[string "..."]:2: actual message"
+	if strings.HasPrefix(result.Message, "[") && strings.Contains(result.Message, "]:") {
+		if idx := strings.Index(result.Message, "]: "); idx != -1 {
+			// Find the colon after line number
+			afterBracket := result.Message[idx+2:]
+			if colonIdx := strings.Index(afterBracket, ": "); colonIdx != -1 {
+				result.Message = strings.TrimSpace(afterBracket[colonIdx+2:])
+			}
+		}
+	}
+
+	return result
+}
+
+// parseLuaErrorFromString extracts info from the Lua error message string.
+// Used for syntax errors from LoadString where no *lua.LuaError is available.
+func (e *LuaEngine) parseLuaErrorFromString(errType, source string) *LuaError {
 	if e.state.GetTop() == 0 {
 		return &LuaError{Type: errType, Message: "unknown Lua error", Source: source}
 	}
@@ -499,8 +548,8 @@ func (e *LuaEngine) safeExecuteScript(ctx context.Context, script string) error 
 					return nil
 				}
 
-				// Other Lua errors
-				luaErr := e.parseLuaError("runtime", err.Error())
+				// Other Lua errors - use type assertion to preserve stack trace
+				luaErr := e.parseLuaErrorFromErr("runtime", err)
 				e.outputChan.ForceSend(LuaOutputRecord{
 					Content:   fmt.Sprintf("Lua error: %s", luaErr.Message),
 					Timestamp: time.Now(),
@@ -521,13 +570,14 @@ func (e *LuaEngine) safeExecuteScript(ctx context.Context, script string) error 
 	}
 }
 
-// LoadScriptFile loads a Lua script from a file
+// LoadScriptFile loads a Lua script from a file.
+// Uses LoadScriptFromPath, which supports project-root-relative paths (starting with "/").
 func (e *LuaEngine) LoadScriptFile(filename string) error {
-	content, err := os.ReadFile(filename)
+	content, err := LoadScriptFromPath(filename)
 	if err != nil {
-		return fmt.Errorf("failed to read script %s: %w", filename, err)
+		return err
 	}
-	return e.LoadScript(string(content), filename)
+	return e.LoadScript(content, filename)
 }
 
 // LoadScript loads a Lua script string and validates it
@@ -541,7 +591,7 @@ func (e *LuaEngine) LoadScript(script, name string) error {
 	var loadErr error
 	e.DoWithState(func(L *lua.State) interface{} {
 		if status := L.LoadString(script); status != 0 {
-			luaErr := e.parseLuaError("syntax", name)
+			luaErr := e.parseLuaErrorFromString("syntax", name)
 			e.outputChan.Send(LuaOutputRecord{
 				Content:   fmt.Sprintf("Lua syntax error: %s", luaErr.Message),
 				Timestamp: time.Now(),
@@ -560,7 +610,10 @@ func (e *LuaEngine) LoadScript(script, name string) error {
 // ExecuteScript runs the loaded Lua script with context cancellation support in persistent state
 func (e *LuaEngine) ExecuteScript(ctx context.Context, script string) error {
 	if script != "" {
-		e.LoadScript(script, "ad-hoc script")
+		err := e.LoadScript(script, "ad-hoc script")
+		if err != nil {
+			return err
+		}
 	}
 	if e.scriptCode == "" {
 		return &LuaError{Type: "api", Message: "no script loaded"}
@@ -580,6 +633,11 @@ func (e *LuaEngine) resetInternal() {
 	e.registerIOWriteCaptureInternal()
 	e.preloadJSONLibInternal()
 	e.registerBlockedLuaFunctions()
+
+	// Create SecureModuleLoader singleton (empty allowedPaths by default)
+	// and register secure require() - must be AFTER blocking dangerous functions
+	e.secureLoader = NewSecureModuleLoader(e.logger)
+	e.secureLoader.Register(e)
 }
 
 // Reset recreates the Lua state
@@ -600,57 +658,17 @@ func (e *LuaEngine) Close() {
 	}
 }
 
-// SetScriptSearchPaths configures Lua's package.path for module loading.
-// It prepends the script's directory and any additional paths to the search path,
-// enabling require() to find modules relative to the script location.
+// SetPackagePaths configures allowed paths for secure module loading.
+// This method adds the script's directory and validated library paths to the
+// SecureModuleLoader's allowedPaths, enabling require() to find modules.
 //
 // Parameters:
-//   - scriptPath: path to the main script file (its directory is added to search path)
-//   - additionalPaths: optional extra directories to search for modules
-func (e *LuaEngine) SetScriptSearchPaths(scriptPath string, additionalPaths []string) {
-	e.DoWithState(func(L *lua.State) interface{} {
-		// Get current package.path
-		L.GetGlobal("package")
-		L.GetField(-1, "path")
-		currentPath := L.ToString(-1)
-		L.Pop(1) // pop current path value
-
-		// Build new path: script dir + additional paths + original path
-		var pathParts []string
-
-		// Add script's directory if provided
-		if scriptPath != "" {
-			absPath, err := filepath.Abs(scriptPath)
-			if err == nil {
-				scriptDir := filepath.Dir(absPath)
-				pathParts = append(pathParts, scriptDir+"/?.lua")
-				pathParts = append(pathParts, scriptDir+"/?/init.lua")
-				e.logger.WithField("script_dir", scriptDir).Debug("Added script directory to Lua package.path")
-			}
-		}
-
-		// Add additional paths
-		for _, p := range additionalPaths {
-			absPath, err := filepath.Abs(p)
-			if err == nil {
-				pathParts = append(pathParts, absPath+"/?.lua")
-				pathParts = append(pathParts, absPath+"/?/init.lua")
-				e.logger.WithField("path", absPath).Debug("Added additional path to Lua package.path")
-			}
-		}
-
-		// Append original path at the end
-		pathParts = append(pathParts, currentPath)
-
-		// Set new package.path
-		newPath := strings.Join(pathParts, ";")
-		L.PushString(newPath)
-		L.SetField(-2, "path")
-		L.Pop(1) // pop package table
-
-		e.logger.WithField("package_path", newPath).Debug("Configured Lua package.path")
-		return nil
-	})
+//   - scriptPath: path to the main script file (its directory is added to allowed paths)
+//   - libPaths: optional extra directories validated and added to allowed paths
+//
+// Returns error if any libPath is invalid (doesn't exist, not a directory, or blocked system path).
+func (e *LuaEngine) SetPackagePaths(scriptPath string, libPaths []string) error {
+	return e.secureLoader.AddPaths(scriptPath, libPaths)
 }
 
 // ExecuteFunction executes a specific Lua function by name

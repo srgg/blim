@@ -3,6 +3,7 @@
 package main
 
 import (
+	"io"
 	"testing"
 	"time"
 
@@ -11,10 +12,8 @@ import (
 	"github.com/srg/blim/internal/device"
 	"github.com/srg/blim/internal/devicefactory"
 	"github.com/srg/blim/internal/testutils"
-	blemocks "github.com/srg/blim/internal/testutils/mocks/goble"
 	"github.com/srg/blim/scanner"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/suite"
 )
 
@@ -34,7 +33,7 @@ type ScanTestSuite struct {
 	}
 }
 
-// SetupSuite runs once before all tests in the suite
+// SetupSuite runs once before all device_test in the suite
 func (suite *ScanTestSuite) SetupSuite() {
 	// Save original flag values
 	suite.originalFlags.scanDuration = scanDuration
@@ -45,18 +44,10 @@ func (suite *ScanTestSuite) SetupSuite() {
 	suite.originalFlags.scanNoDuplicate = scanNoDuplicate
 	suite.originalFlags.scanWatch = scanWatch
 
-	// Save the original BLE device factory and inject mock
-	suite.originalDeviceFactory = devicefactory.DeviceFactory
-	devicefactory.DeviceFactory = func() (device.Scanner, error) {
-		mockDevice := &blemocks.MockDevice{}
-		// Set up expectations for the Scan method
-		mockDevice.On("Scan", mock.Anything, mock.Anything, mock.Anything).Return(nil)
-		// Wrap mock device to implement device.Scanner interface
-		return &bleScanningDeviceMock{Device: mockDevice}, nil
-	}
+	suite.CommandTestSuite.SetupSuite()
 }
 
-// TearDownSuite runs once after all tests in the suite
+// TearDownSuite runs once after all device_test in the suite
 func (suite *ScanTestSuite) TearDownSuite() {
 	// Restore original factories and flag values
 	devicefactory.DeviceFactory = suite.originalDeviceFactory
@@ -71,11 +62,13 @@ func (suite *ScanTestSuite) TearDownSuite() {
 
 // SetupTest runs before each test in the suite
 func (suite *ScanTestSuite) SetupTest() {
+	suite.CommandTestSuite.SetupTest()
+
 	// Reset flags before each test for proper isolation
 	resetScanFlags()
 
 	// Reset the scanCmd and re-initialize flags to ensure a clean state for each test
-	// This prevents command state pollution between tests
+	// This prevents command state pollution between device_test
 	scanCmd.ResetFlags()
 
 	// Re-add all the flags with their default values
@@ -102,6 +95,7 @@ func (suite *ScanTestSuite) TestScanCmd_Help() {
 	suite.Assert().Contains(output, "Scan for and display Bluetooth Low Energy devices", "help MUST contain command description")
 	suite.Assert().Contains(output, "--duration", "help MUST document --duration flag")
 	suite.Assert().Contains(output, "--format", "help MUST document --format flag")
+	suite.CommandTestSuite.TearDownTest()
 }
 
 func (suite *ScanTestSuite) TestScanCmd_InvalidFormat() {
@@ -199,7 +193,7 @@ func (suite *ScanTestSuite) TestScanCmd_Flags() {
 	}
 }
 
-// TestScanCmd_WatchMode tests watch mode starts and runs indefinitely
+// TestScanCmd_WatchMode device_test watch mode starts and runs indefinitely
 func (suite *ScanTestSuite) TestScanCmd_WatchMode() {
 	// GOAL: Verify watch mode starts and runs indefinitely (doesn't exit on its own)
 	//
@@ -232,7 +226,7 @@ func TestDisplayDevicesTable(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.PanicLevel)
 
-	device1 := testutils.CreateMockAdvertisementFromJSON(`{
+	device1 := testutils.NewAdvertisementBuilder().FromJSON(`{
 			"name": "Test Device 1",
 			"address": "AA:BB:CC:DD:EE:FF",
 			"rssi": -45,
@@ -243,7 +237,7 @@ func TestDisplayDevicesTable(t *testing.T) {
 			"connectable": true
 		}`).BuildDevice(logger)
 
-	device2 := testutils.CreateMockAdvertisementFromJSON(`{
+	device2 := testutils.NewAdvertisementBuilder().FromJSON(`{
 			"name": "",
 			"address": "11:22:33:44:55:66",
 			"rssi": -70,
@@ -259,7 +253,7 @@ func TestDisplayDevicesTable(t *testing.T) {
 		{Device: device2, LastSeen: time.Now()},
 	}
 
-	err := displayDevicesTable(devices)
+	err := displayDevicesTable(io.Discard, devices)
 	assert.NoError(t, err, "displayDevicesTable MUST NOT return error")
 }
 
@@ -271,7 +265,7 @@ func TestDisplayDevicesJSON(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.PanicLevel)
 
-	dev := testutils.CreateMockAdvertisementFromJSON(`{
+	dev := testutils.NewAdvertisementBuilder().FromJSON(`{
 			"name": "Test Device",
 			"address": "AA:BB:CC:DD:EE:FF",
 			"rssi": -45,
@@ -323,7 +317,7 @@ func TestDevice_DisplayName_Integration(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			dev := testutils.CreateMockAdvertisementFromJSON(`{
+			dev := testutils.NewAdvertisementBuilder().FromJSON(`{
 				"name": "%s",
 				"address": "%s",
 				"rssi": -50,
@@ -346,7 +340,7 @@ func TestClearScreen(t *testing.T) {
 	// TEST SCENARIO: Call clearScreen() → completes without panic
 
 	assert.NotPanics(t, func() {
-		clearScreen()
+		clearScreen(io.Discard)
 	}, "clearScreen MUST NOT panic")
 }
 

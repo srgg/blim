@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"io"
 	"os"
 	"syscall"
 	"testing"
@@ -19,7 +20,7 @@ import (
 	"github.com/stretchr/testify/suite"
 )
 
-// bleScanningDeviceMock wraps ble.Device to implement device.Scanner for tests
+// bleScanningDeviceMock wraps ble.Device to implement device.Scanner for device_test
 type bleScanningDeviceMock struct {
 	blelib.Device
 }
@@ -32,12 +33,12 @@ func (s *bleScanningDeviceMock) Scan(ctx context.Context, allowDup bool, handler
 	return s.Device.Scan(ctx, allowDup, bleHandler)
 }
 
-// ScanInterruptSuite tests scan interrupt behavior with proper mock setup
+// ScanInterruptSuite device_test scan interrupt behavior with proper mock setup
 type ScanInterruptSuite struct {
 	CommandTestSuite
 }
 
-// createTestLogger creates a configured logger for tests
+// createTestLogger creates a configured logger for device_test
 func (s *ScanInterruptSuite) createTestLogger() *logrus.Logger {
 	logger := logrus.New()
 	logger.SetLevel(logrus.DebugLevel)
@@ -55,7 +56,7 @@ func (s *ScanInterruptSuite) createTestScanner() *scanner.Scanner {
 	return scan
 }
 
-// SetupTest configures mock advertisements for scan tests
+// SetupTest configures mock advertisements for scan device_test
 func (s *ScanInterruptSuite) SetupTest() {
 	// Configure mock advertisements for scanning
 	adv1 := testutils.StandardAdvertisement("AA:BB:CC:DD:EE:FF")
@@ -70,24 +71,15 @@ func (s *ScanInterruptSuite) SetupTest() {
 		WithTxPower(0).
 		Build()
 
-	// Use WithBlockingScan() to make a scan block after emitting advertisements
-	// This simulates real BLE scanning for interrupt testing
-	s.WithPeripheral().
-		WithScanAdvertisements().
-		WithBlockingScan().WithAdvertisements(adv1, adv2).Build().
-		Build()
+	// Use WithBlockingScan() to make the scan block after emitting advertisements,
+	// mimicking BLE scanning behavior for interrupt testing.
+	s.GivenPeripheral(func(builder *testutils.PeripheralDeviceBuilder) {
+		builder.WithScanAdvertisements().
+			WithBlockingScan().WithAdvertisements(adv1, adv2).Build()
+	})
 
 	// Call parent to apply mock configuration
 	s.CommandTestSuite.SetupTest()
-
-	// Wrap the device in a scanner adapter
-	bleDevice := s.PeripheralBuilder.Build()
-	scanningDevice := &bleScanningDeviceMock{Device: bleDevice}
-
-	// Update the device factory
-	devicefactory.DeviceFactory = func() (device.Scanner, error) {
-		return scanningDevice, nil
-	}
 }
 
 // hangingScanDevice simulates Bluetooth being disabled mid-scan by emitting one ad then hanging
@@ -105,7 +97,7 @@ func (h *hangingScanDevice) Scan(ctx context.Context, allowDup bool, handler fun
 	return device.ErrBluetoothOff
 }
 
-// TestSingleScanInterrupt tests that a single scan with duration responds to SIGINT
+// TestSingleScanInterrupt device_test that a single scan with duration responds to SIGINT
 func (s *ScanInterruptSuite) TestSingleScanInterrupt() {
 	// GOAL: Verify a single scan with duration exists cleanly on SIGINT
 	//
@@ -126,7 +118,7 @@ func (s *ScanInterruptSuite) TestSingleScanInterrupt() {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- runSingleScan(scan, scanOpts, cfg, logger)
+		done <- runSingleScan(io.Discard, scan, scanOpts, cfg, logger)
 	}()
 
 	time.Sleep(100 * time.Millisecond)
@@ -144,7 +136,7 @@ func (s *ScanInterruptSuite) TestSingleScanInterrupt() {
 	}
 }
 
-// TestWatchModeInterrupt tests that watch mode responds to SIGINT
+// TestWatchModeInterrupt device_test that watch mode responds to SIGINT
 func (s *ScanInterruptSuite) TestWatchModeInterrupt() {
 	// GOAL: Verify watch mode exits cleanly on SIGINT without hanging
 	//
@@ -165,7 +157,7 @@ func (s *ScanInterruptSuite) TestWatchModeInterrupt() {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- runWatchMode(scan, watchOpts, cfg, logger)
+		done <- runWatchMode(io.Discard, scan, watchOpts, cfg, logger)
 	}()
 
 	time.Sleep(100 * time.Millisecond)
@@ -183,7 +175,7 @@ func (s *ScanInterruptSuite) TestWatchModeInterrupt() {
 	}
 }
 
-// TestWatchModeHangAfterScanFinishes tests that watch mode runs indefinitely and responds to an interrupt
+// TestWatchModeHangAfterScanFinishes device_test that watch mode runs indefinitely and responds to an interrupt
 func (s *ScanInterruptSuite) TestWatchModeHangAfterScanFinishes() {
 	// GOAL: Verify watch mode runs indefinitely until interrupted
 	//
@@ -201,12 +193,13 @@ func (s *ScanInterruptSuite) TestWatchModeHangAfterScanFinishes() {
 		DuplicateFilter: true,
 	}
 
+	// Run scan till interrupt
 	done := make(chan error, 1)
 	go func() {
-		done <- runWatchMode(scan, shortOpts, cfg, logger)
+		done <- runWatchMode(io.Discard, scan, shortOpts, cfg, logger)
 	}()
 
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(500 * time.Millisecond)
 
 	select {
 	case err := <-done:
@@ -237,6 +230,10 @@ func (s *ScanInterruptSuite) TestWatchModeBluetoothDisabled() {
 	adv := testutils.StandardAdvertisement("AA:BB:CC:DD:EE:FF")
 	hangingDev := &hangingScanDevice{adv: adv}
 
+	// Save and restore original factory to avoid polluting other tests
+	originalFactory := devicefactory.DeviceFactory
+	defer func() { devicefactory.DeviceFactory = originalFactory }()
+
 	devicefactory.DeviceFactory = func() (device.Scanner, error) {
 		return hangingDev, nil
 	}
@@ -256,7 +253,7 @@ func (s *ScanInterruptSuite) TestWatchModeBluetoothDisabled() {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- runWatchMode(scan, watchOpts, cfg, logger)
+		done <- runWatchMode(io.Discard, scan, watchOpts, cfg, logger)
 	}()
 
 	time.Sleep(100 * time.Millisecond)

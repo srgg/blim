@@ -4,7 +4,7 @@ package testutils
 
 import "github.com/srg/blim/internal/device"
 
-// StandardPeripheral is the universal default peripheral for most command tests.
+// StandardPeripheral is the universal default peripheral for most command device_test.
 // Contains Heart Rate (180d) and Battery (180f) services with common characteristics.
 const StandardPeripheral = `{
 	"services": [
@@ -92,7 +92,7 @@ const NotifiablePeripheral = `{
 }`
 
 // StandardAdvertisement creates a test advertisement with common default values.
-// Address is customizable to support multiple device scenarios in tests.
+// Address is customizable to support multiple device scenarios in device_test.
 // Used by: scan_interrupt_test.go, inspect_test.go
 func StandardAdvertisement(address string) device.Advertisement {
 	return NewAdvertisementBuilder().

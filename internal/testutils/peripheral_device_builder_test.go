@@ -14,7 +14,7 @@ import (
 	"github.com/stretchr/testify/suite"
 )
 
-// PeripheralDeviceBuilderTestSuite tests PeripheralDeviceBuilder functionality
+// PeripheralDeviceBuilderTestSuite device_test PeripheralDeviceBuilder functionality
 type PeripheralDeviceBuilderTestSuite struct {
 	suite.Suite
 }
@@ -235,8 +235,8 @@ func (s *PeripheralDeviceBuilderTestSuite) TestWithAggregateFormatDescriptor() {
 			WithPresentationFormat(format2).
 			Build()
 
-		device := builder.Build()
-		profile := s.getBuiltProfile(device)
+		dev := builder.Build()
+		profile := s.getBuiltProfile(dev)
 		s.assertHandlesAndIndexesInDeviceProfile(profile)
 	})
 
@@ -271,14 +271,14 @@ func (s *PeripheralDeviceBuilderTestSuite) TestWithAggregateFormatDescriptor() {
 		builder := NewPeripheralDeviceBuilder(s.T()).
 			WithService("1234").
 			WithCharacteristic("5678", "read,notify", []byte{0x00}).
-			WithDescriptor("2902", cccdValue).
+			WithDescriptor("2902", cccdValue...).
 			WithAggregateFormatDescriptor().
 			WithPresentationFormat(format1).
 			WithPresentationFormat(format2).
 			Build()
 
-		device := builder.Build()
-		profile := s.getBuiltProfile(device)
+		dev := builder.Build()
+		profile := s.getBuiltProfile(dev)
 		s.assertHandlesAndIndexesInDeviceProfile(profile)
 	})
 
@@ -295,8 +295,8 @@ func (s *PeripheralDeviceBuilderTestSuite) TestWithAggregateFormatDescriptor() {
 			Build().
 			WithCharacteristic("abcd", "read", []byte{0x01})
 
-		device := builder.Build()
-		profile := s.getBuiltProfile(device)
+		dev := builder.Build()
+		profile := s.getBuiltProfile(dev)
 		s.assertHandlesAndIndexesInDeviceProfile(profile)
 	})
 }

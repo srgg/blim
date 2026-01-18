@@ -3,14 +3,8 @@ package main
 import (
 	"context"
 	"errors"
-)
 
-// Command-level errors
-var (
-	// ErrConnectionLost indicates the BLE connection was unexpectedly lost during operation.
-	// This is distinct from device.ErrNotConnected, which indicates an attempt to use
-	// a device that was never connected or was already disconnected.
-	ErrConnectionLost = errors.New("connection lost")
+	"github.com/srg/blim/internal/device"
 )
 
 // FormatUserError converts errors to user-friendly messages without technical details.
@@ -22,7 +16,7 @@ func FormatUserError(err error) string {
 	}
 
 	// Handle specific known errors with clean messages
-	if errors.Is(err, ErrConnectionLost) {
+	if errors.Is(err, device.ErrConnectionLost) {
 		return "connection lost"
 	}
 

@@ -1,9 +1,10 @@
-package device
+package device_test
 
 import (
 	"strings"
 	"testing"
 
+	"github.com/srg/blim/internal/device"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -106,7 +107,7 @@ func TestNormalizeUUID(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := NormalizeUUID(tt.input)
+			result := device.NormalizeUUID(tt.input)
 			assert.Equal(t, tt.expected, result)
 		})
 	}
@@ -127,7 +128,7 @@ func TestNormalizeUUIDs(t *testing.T) {
 		"6e400001b5a3f393e0a9e50e24dcca9e",
 	}
 
-	result := NormalizeUUIDs(input)
+	result := device.NormalizeUUIDs(input)
 	assert.Equal(t, expected, result)
 }
 
@@ -146,7 +147,7 @@ func TestNormalizeUUID_Consistency(t *testing.T) {
 
 	for _, uuid := range uuidVariants {
 		t.Run(uuid, func(t *testing.T) {
-			result := NormalizeUUID(uuid)
+			result := device.NormalizeUUID(uuid)
 			assert.Equal(t, expected, result, "UUID %s should normalize to %s", uuid, expected)
 		})
 	}
@@ -183,7 +184,7 @@ func TestNormalizeUUID_NoShortening(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := NormalizeUUID(tt.input)
+			result := device.NormalizeUUID(tt.input)
 			// Should be normalized (lowercase, no dashes) but NOT shortened to 4 chars
 			assert.NotEqual(t, "2902", result, "Should NOT shorten: %s", tt.reason)
 			assert.NotContains(t, result, "-", "Should have dashes removed")

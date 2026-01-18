@@ -20,7 +20,7 @@ const (
 
 // DescriptorError represents a failed descriptor value read attempt
 type DescriptorError struct {
-	Reason string // "timeout", "read_error", "parse_error"
+	Reason string // "read_timeout", "read_error", "parse_error"
 	Err    error  // underlying error if available
 }
 

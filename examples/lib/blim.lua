@@ -56,6 +56,15 @@ function blim.to_hex(data)
     return table.concat(hex, " ")
 end
 
+function blim.to_little_endian_bytes(data)
+    if not data or data == "" then return "" end
+    local result = {}
+    for i = #data, 1, -1 do
+        table.insert(result, data:sub(i, i))
+    end
+    return table.concat(result)
+end
+
 -- Convert byte string to hex representation without spaces (uppercase)
 -- Example: "AB\x01" -> "4142FF"
 function blim.bytes_to_hex(data)

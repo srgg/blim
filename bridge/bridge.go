@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -24,7 +25,7 @@ const (
 
 // Bridge represents a running BLE-PTY bridge with access to the device and PTY
 type Bridge interface {
-	GetLuaAPI() *lua.LuaAPI
+	GetLuaAPI() lua.LuaAPIInterface
 	GetTTYName() string                 // TTY device name for display
 	GetTTYSymlink() string              // Symlink path (empty if not created)
 	GetPTY() io.ReadWriter              // PTY I/O as a standard Go interface (for Lua exposure)
@@ -34,14 +35,15 @@ type Bridge interface {
 
 // BridgeOptions contains all the configuration for running a bridge
 type BridgeOptions struct {
-	BleAddress               string                    // BLE device address
-	BleConnectTimeout        time.Duration             // BLE Connection timeout
-	BleDescriptorReadTimeout time.Duration             // Timeout for reading descriptor values (0 = skip reads)
-	BleSubscribeOptions      []device.SubscribeOptions // BLE subscribe options
-	Logger                   *logrus.Logger            // Logger instance
-	PtyStdinBufferSize       int                       // PTY stdin ring buffer size in bytes (0 = use default)
-	PtyStdoutBufferSize      int                       // PTY stdout ring buffer size in bytes (0 = use default)
-	TTYSymlinkPath           string                    // Optional tty symlink path for PTY slave (e.g., /tmp/ble-device)
+	BleAddress               string                      // BLE device address
+	BleConnectTimeout        time.Duration               // BLE Connection timeout
+	BleDescriptorReadTimeout time.Duration               // Timeout for reading descriptor values (0 = skip reads)
+	BleSubscribeOptions      []device.SubscribeOptions   // BLE subscribe options
+	Logger                   *logrus.Logger              // Logger instance
+	PtyStdinBufferSize       int                         // PTY stdin ring buffer size in bytes (0 = use default)
+	PtyStdoutBufferSize      int                         // PTY stdout ring buffer size in bytes (0 = use default)
+	TTYSymlinkPath           string                      // Optional tty symlink path for PTY slave (e.g., /tmp/ble-device)
+	Factory                  devicefactory.BridgeFactory // Factory for creating bridge components (nil = use default)
 }
 
 // ProgressCallback is called when the bridge phase changes
@@ -52,12 +54,12 @@ type BridgeCallback[R any] func(Bridge) (R, error)
 
 // bridgeImpl implements the Bridge interface
 type bridgeImpl struct {
-	luaApi         *lua.LuaAPI
+	luaApi         lua.LuaAPIInterface
 	ttySymlinkPath string    // TTY Symlink (empty if not created)
 	pty            ptyio.PTY // PTY I/O interface for async monitoring
 }
 
-func (b *bridgeImpl) GetLuaAPI() *lua.LuaAPI {
+func (b *bridgeImpl) GetLuaAPI() lua.LuaAPIInterface {
 	return b.luaApi
 }
 
@@ -123,12 +125,17 @@ func RunDeviceBridge[R any](
 
 	// Setup cleanup on error
 	var (
-		luaApi         *lua.LuaAPI
+		luaApi         lua.LuaAPIInterface
 		ttySymlinkPath string
 		pty            ptyio.PTY
 	)
 
 	defer func() {
+		// Clear bridge reference before cleanup (prevents Lua from using stale bridge)
+		if luaApi != nil {
+			luaApi.SetBridge(nil)
+		}
+
 		// Remove tty symlink before closing PTY (cleanup order matters)
 		if ttySymlinkPath != "" {
 			if err := os.Remove(ttySymlinkPath); err != nil {
@@ -141,6 +148,7 @@ func RunDeviceBridge[R any](
 		// Close PTY I/O strategy (stops background monitoring and closes master/slave)
 		if pty != nil {
 			_ = pty.Close()
+			logger.Infof("Closed PTY: %s", pty.TTYName())
 		}
 
 		if luaApi != nil {
@@ -151,12 +159,14 @@ func RunDeviceBridge[R any](
 		}
 	}()
 
+	// Use factory from options (nil = default)
+	factory := opts.Factory
+	if factory == nil {
+		factory = devicefactory.DefaultBridgeFactory
+	}
+
 	// Report phase: Connecting
 	progressCallback("Connecting")
-
-	// Create Lua API (creates device)
-	dev := devicefactory.NewDevice(opts.BleAddress, logger)
-	luaApi = lua.NewBLEAPI2(dev, logger)
 
 	// Connect to device
 	connectOpts := &device.ConnectOptions{
@@ -166,9 +176,9 @@ func RunDeviceBridge[R any](
 		Services:              opts.BleSubscribeOptions,
 	}
 
-	if err := luaApi.GetDevice().Connect(bridgeCtx, connectOpts); err != nil {
-		progressCallback("Failed")
-		return zero, fmt.Errorf("failed to connect to device %s: %w", opts.BleAddress, err)
+	luaApi, err := factory.CreateLuaAPI(bridgeCtx, connectOpts, logger)
+	if err != nil {
+		return zero, fmt.Errorf("failed to create Lua API for device %s: %w", opts.BleAddress, err)
 	}
 
 	// Report phase: Connected
@@ -189,24 +199,20 @@ func RunDeviceBridge[R any](
 	}
 
 	// Create PTY I/O strategy with background slave monitoring
-	var err error
-	pty, err = ptyio.NewPty(inputBufferSize, outputBufferSize, logger)
+	pty, err = factory.CreatePTY(inputBufferSize, outputBufferSize, logger)
 	if err != nil {
 		return zero, err
 	}
 
-	logger.WithField("tty", pty.TTYName()).Info("Created PTY device")
+	logger.Infof("Created PTY: %s", pty.TTYName())
 
-	// Create symlink to PTY slave if requested
+	// Create symlink to a PTY slave if requested
 	if opts.TTYSymlinkPath != "" {
-		if err := os.Symlink(pty.TTYName(), opts.TTYSymlinkPath); err != nil {
+		if err := factory.CreateSymlink(pty.TTYName(), opts.TTYSymlinkPath); err != nil {
 			return zero, fmt.Errorf("failed to create tty symlink %s -> %s: %w", opts.TTYSymlinkPath, pty.TTYName(), err)
 		}
 		ttySymlinkPath = opts.TTYSymlinkPath
-		logger.WithFields(logrus.Fields{
-			"ttySymlink": ttySymlinkPath,
-			"target":     pty.TTYName(),
-		}).Info("Created PTY symlink")
+		logger.Infof("Created PTY symlink: %s -> %s", ttySymlinkPath, pty.TTYName())
 	}
 
 	// Report phase: Running
@@ -224,4 +230,124 @@ func RunDeviceBridge[R any](
 
 	// Execute callback with the bridge
 	return callback(bridge)
+}
+
+// CLIBridgeConfig configures the CLI bridge runner.
+type CLIBridgeConfig struct {
+	DeviceAddress  string
+	ConnectTimeout time.Duration
+	Symlink        string // Create a symlink to the PTY device (e.g., /tmp/ble-device)")
+
+	ScriptContent string
+	ScriptArgs    map[string]string
+	ScriptOpts    *lua.ScriptOptions
+	Stdout        io.Writer // nil = discard
+	Stderr        io.Writer // nil = discard
+	ServiceUUID   string    // "BLE service UUID to bridge
+
+	CharacteristicReadTimeout  time.Duration // Timeout for characteristic read operations
+	CharacteristicWriteTimeout time.Duration // Timeout for characteristic write operations
+	DescriptorReadTimeout      time.Duration // Timeout for reading descriptor values (default: 2s if unset, 0 to skip descriptor reads)")
+
+	Logger  *logrus.Logger
+	Factory devicefactory.BridgeFactory // Factory for creating bridge components (nil = use default)
+}
+
+func RunCliBridge(ctx context.Context, progressCallback ProgressCallback, opts CLIBridgeConfig) error {
+	// Bridge callback - executes the Lua script with output streaming
+	bridgeCallback := func(b Bridge) (any, error) {
+
+		// HACK: Create an output drainer to capture output from the Lua API,
+		// 		even though the script execution completed, the bridge is keeping the Lua State open, using it by
+		// 		calling the Lua callbacks until the bridge is canceled.
+		drainer := lua.NewOutputDrainer(ctx, b.GetLuaAPI().OutputChannel(), opts.Logger, opts.Stdout, opts.Stderr)
+
+		defer func() {
+			// Stop the drainer after the bridge completes
+			drainer.Cancel()
+			drainer.Wait()
+		}()
+
+		// Execute the Lua script
+		err := lua.ExecuteDeviceScriptWithOutput(
+			ctx,
+			nil,
+			b.GetLuaAPI(),
+			opts.Logger,
+			opts.ScriptContent,
+			opts.ScriptArgs,
+			nil,
+			nil,
+			opts.CharacteristicReadTimeout,
+			opts.CharacteristicWriteTimeout,
+			opts.ScriptOpts,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		// Script executed successfully, and subscriptions are active
+		// Monitor connection context for errors (e.g., disconnection)
+		dev := b.GetLuaAPI().GetDevice()
+		conn := dev.GetConnection()
+		if conn == nil {
+			return nil, fmt.Errorf("no connection available")
+		}
+
+		connCtx := conn.ConnectionContext()
+		if connCtx == nil {
+			return nil, fmt.Errorf("connection context not available")
+		}
+
+		opts.Logger.WithField("context_ptr", fmt.Sprintf("%p", connCtx)).
+			Info("Bridge monitoring started, waiting for connection errors or shutdown...")
+
+		// Signal that bridge is fully ready (script loaded and executed successfully)
+		if progressCallback != nil {
+			progressCallback("Ready")
+		}
+
+		select {
+		case <-connCtx.Done():
+			// Connection context canceled - check the cause
+			cause := context.Cause(connCtx)
+
+			if cause != nil {
+				if errors.Is(cause, device.ErrNotConnected) {
+					// Connection lost
+					return nil, device.ErrConnectionLost
+				}
+
+				// Connection context canceled with unknown cause
+				return nil, fmt.Errorf("connection error: %w", cause)
+			}
+			// Context canceled without cause (normal shutdown)
+			return nil, nil
+		case <-ctx.Done():
+			opts.Logger.Info("Bridge shutting down...")
+			return nil, nil
+		}
+	}
+
+	// Run the bridge with callback
+	_, err := RunDeviceBridge(
+		ctx,
+		&BridgeOptions{
+			BleAddress:               opts.DeviceAddress,
+			BleConnectTimeout:        opts.ConnectTimeout,
+			BleDescriptorReadTimeout: opts.DescriptorReadTimeout,
+			BleSubscribeOptions: []device.SubscribeOptions{
+				{
+					Service: opts.ServiceUUID,
+				},
+			},
+			Logger:         opts.Logger,
+			TTYSymlinkPath: opts.Symlink,
+			Factory:        opts.Factory,
+		},
+		progressCallback,
+		bridgeCallback,
+	)
+
+	return err
 }

@@ -81,6 +81,14 @@ func (ja *JSONAsserter) Assert(actualJSON, expectedJSON string) {
 	}
 }
 
+func (ja *JSONAsserter) AssertErr(actualJSON, expectedJSON string) error {
+	diff := ja.diff(actualJSON, expectedJSON)
+	if diff != "" {
+		return fmt.Errorf("JSON assertion failed:\n%s", diff)
+	}
+	return nil
+}
+
 // AssertDevice compares actual Device against expectedJSON
 func (ja *JSONAsserter) AssertDevice(dev device.Device, expectedJSON string) {
 	actualJSON := DeviceToJSON(dev)

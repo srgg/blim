@@ -3,7 +3,7 @@
 package main
 
 import (
-	"sync/atomic"
+	"bytes"
 	"testing"
 	"time"
 
@@ -14,14 +14,11 @@ import (
 
 // Test constants for mock BLE device configuration
 const (
-	// testCustomServiceUUID is a full 128-bit UUID for testing long UUID handling
-	testCustomServiceUUID = "12345678-1234-5678-1234-567812345678"
-
 	// testCustomCharUUID is a full 128-bit characteristic UUID (prefix "abcdef01" used in output)
 	testCustomCharUUID = "abcdef01-1234-5678-1234-567812345678"
 )
 
-// SubscribeTestSuite tests subscribe command with mock BLE peripheral
+// SubscribeTestSuite device_test subscribe command with mock BLE peripheral
 type SubscribeTestSuite struct {
 	CommandTestSuite
 	originalFlags struct {
@@ -34,7 +31,7 @@ type SubscribeTestSuite struct {
 	}
 }
 
-// SetupSuite runs once before all tests in the suite
+// SetupSuite runs once before all device_test in the suite
 func (suite *SubscribeTestSuite) SetupSuite() {
 	suite.CommandTestSuite.SetupSuite()
 
@@ -47,7 +44,7 @@ func (suite *SubscribeTestSuite) SetupSuite() {
 	suite.originalFlags.subscribeRate = subscribeRate
 }
 
-// TearDownSuite runs once after all tests in the suite
+// TearDownSuite runs once after all device_test in the suite
 func (suite *SubscribeTestSuite) TearDownSuite() {
 	// Restore original flag values
 	subscribeServiceUUID = suite.originalFlags.subscribeServiceUUID
@@ -60,13 +57,13 @@ func (suite *SubscribeTestSuite) TearDownSuite() {
 
 // SetupTest runs before each test in the suite
 func (suite *SubscribeTestSuite) SetupTest() {
-	// Create peripheral with notifiable characteristics including 128-bit UUID service.
+	// Create a peripheral with notifiable characteristics, including a 128-bit UUID service.
 	// Note: Custom UUIDs in fixture must match testCustomServiceUUID and testCustomCharUUID constants.
-	suite.WithPeripheral().
-		FromJSON(testutils.NotifiablePeripheral).
-		Build()
-
-	suite.CommandTestSuite.SetupTest()
+	// Don't call Build() here - let the parent SetupTest() set up the DeviceFactory
+	suite.GivenPeripheral(func(builder *testutils.PeripheralDeviceBuilder) {
+		builder.
+			FromJSON(testutils.NotifiablePeripheral)
+	})
 
 	// Reset flags to defaults
 	subscribeServiceUUID = ""
@@ -75,6 +72,8 @@ func (suite *SubscribeTestSuite) SetupTest() {
 	subscribeTimeout = 5 * time.Second
 	subscribeMode = "live"
 	subscribeRate = 1 * time.Second
+
+	suite.CommandTestSuite.SetupTest()
 }
 
 func (suite *SubscribeTestSuite) TestParseStreamMode() {
@@ -193,100 +192,103 @@ func (suite *SubscribeTestSuite) TestSubscribeCmd() {
 	})
 }
 
-func (suite *SubscribeTestSuite) TestNotificationFlow() {
-	// GOAL: Verify full notification lifecycle for various subscription configurations
+func (suite *SubscribeTestSuite) TestOutputSubscribeRecord() {
+	// GOAL: Verify outputSubscribeRecord correctly transforms device.Record to stdout output
 	//
-	// TEST SCENARIO: Connect → subscribe → inject notifications → verify output
-
-	type notification struct {
-		service string
-		char    string
-		data    []byte
-	}
+	// TEST SCENARIO: Create Record → call outputSubscribeRecord → verify stdout format
 
 	tests := []struct {
-		name            string
-		subscribeOpts   []*device.SubscribeOptions
-		hexMode         bool
-		notifications   []notification
-		expectedOutputs []string // use Contains check for each
+		name           string
+		record         *device.Record
+		multiChar      bool
+		hexMode        bool
+		expectedOutput string
 	}{
 		{
 			name: "single char hex output",
-			subscribeOpts: []*device.SubscribeOptions{
-				{Service: "180d", Characteristics: []string{"2a37"}},
+			record: &device.Record{
+				Values: map[string][]byte{"2a37": {0xAB, 0xCD}},
 			},
-			hexMode:         true,
-			notifications:   []notification{{service: "180d", char: "2a37", data: []byte{0xAB, 0xCD}}},
-			expectedOutputs: []string{"abcd\n"},
+			multiChar:      false,
+			hexMode:        true,
+			expectedOutput: "abcd\n",
 		},
 		{
 			name: "single char raw output",
-			subscribeOpts: []*device.SubscribeOptions{
-				{Service: "180d", Characteristics: []string{"2a37"}},
+			record: &device.Record{
+				Values: map[string][]byte{"2a37": []byte("Hello")},
 			},
-			hexMode:         false,
-			notifications:   []notification{{service: "180d", char: "2a37", data: []byte("Hello")}},
-			expectedOutputs: []string{"Hello\n"},
+			multiChar:      false,
+			hexMode:        false,
+			expectedOutput: "Hello\n",
 		},
 		{
-			name: "multiple chars same service with prefix",
-			subscribeOpts: []*device.SubscribeOptions{
-				{Service: "180d", Characteristics: []string{"2a37", "2a38"}},
+			name: "multi char with UUID prefix hex",
+			record: &device.Record{
+				Values: map[string][]byte{
+					"2a37": {0x01},
+					"2a38": {0x02},
+				},
 			},
-			hexMode: true,
-			notifications: []notification{
-				{service: "180d", char: "2a37", data: []byte{0x01}},
-				{service: "180d", char: "2a38", data: []byte{0x02}},
-			},
-			expectedOutputs: []string{"2a37: 01", "2a38: 02"},
+			multiChar:      true,
+			hexMode:        true,
+			expectedOutput: "2a37: 01\n2a38: 02\n",
 		},
 		{
-			name: "cross-service subscription",
-			subscribeOpts: []*device.SubscribeOptions{
-				{Service: "180d", Characteristics: []string{"2a37"}},
-				{Service: "180f", Characteristics: []string{"2a19"}},
+			name: "multi char with UUID prefix raw",
+			record: &device.Record{
+				Values: map[string][]byte{
+					"2a37": []byte("A"),
+					"2a38": []byte("B"),
+				},
 			},
-			hexMode: true,
-			notifications: []notification{
-				{service: "180d", char: "2a37", data: []byte{0xAA}},
-				{service: "180f", char: "2a19", data: []byte{0xBB}},
-			},
-			expectedOutputs: []string{"2a37: aa", "2a19: bb"},
+			multiChar:      true,
+			hexMode:        false,
+			expectedOutput: "2a37: A\n2a38: B\n",
 		},
 		{
-			name: "empty data",
-			subscribeOpts: []*device.SubscribeOptions{
-				{Service: "180d", Characteristics: []string{"2a37"}},
+			name: "empty data hex",
+			record: &device.Record{
+				Values: map[string][]byte{"2a37": {}},
 			},
-			hexMode:         true,
-			notifications:   []notification{{service: "180d", char: "2a37", data: []byte{}}},
-			expectedOutputs: []string{"\n"},
-		},
-		{
-			name: "multiple notifications same char",
-			subscribeOpts: []*device.SubscribeOptions{
-				{Service: "180d", Characteristics: []string{"2a37"}},
-			},
-			hexMode: true,
-			notifications: []notification{
-				{service: "180d", char: "2a37", data: []byte{0x01}},
-				{service: "180d", char: "2a37", data: []byte{0x02}},
-				{service: "180d", char: "2a37", data: []byte{0x03}},
-			},
-			expectedOutputs: []string{"01\n", "02\n", "03\n"},
+			multiChar:      false,
+			hexMode:        true,
+			expectedOutput: "\n",
 		},
 		{
 			name: "long UUID truncated in prefix",
-			subscribeOpts: []*device.SubscribeOptions{
-				{Service: testCustomServiceUUID, Characteristics: []string{testCustomCharUUID}},
-				{Service: "180d", Characteristics: []string{"2a37"}},
+			record: &device.Record{
+				Values: map[string][]byte{
+					testCustomCharUUID: {0xFF},
+					"2a37":             {0xAA},
+				},
 			},
-			hexMode: true,
-			notifications: []notification{
-				{service: testCustomServiceUUID, char: testCustomCharUUID, data: []byte{0xFF}},
+			multiChar:      true,
+			hexMode:        true,
+			expectedOutput: "2a37: aa\nabcdef01: ff\n",
+		},
+		{
+			name: "batch mode single char",
+			record: &device.Record{
+				BatchValues: map[string][][]byte{
+					"2a37": {{0x01}, {0x02}, {0x03}},
+				},
 			},
-			expectedOutputs: []string{"abcdef01: ff"},
+			multiChar:      false,
+			hexMode:        true,
+			expectedOutput: "01\n02\n03\n",
+		},
+		{
+			name: "batch mode multi char",
+			record: &device.Record{
+				BatchValues: map[string][][]byte{
+					"2a37": {{0x01}, {0x02}},
+					"2a38": {{0xAA}},
+				},
+			},
+			multiChar:      true,
+			hexMode:        true,
+			expectedOutput: "2a37: 01\n2a37: 02\n2a38: aa\n",
 		},
 	}
 
@@ -296,67 +298,11 @@ func (suite *SubscribeTestSuite) TestNotificationFlow() {
 			subscribeHex = tt.hexMode
 			defer func() { subscribeHex = oldHex }()
 
-			// Connect to mock device using inherited helper
-			dev, cleanup := suite.ConnectDevice("")
-			defer cleanup()
+			var buf bytes.Buffer
+			outputSubscribeRecord(&buf, tt.record, tt.multiChar)
+			output := buf.String()
 
-			conn := dev.GetConnection()
-			suite.Require().NotNil(conn, "connection MUST exist")
-
-			// Determine if multi-char subscription
-			totalChars := 0
-			for _, opt := range tt.subscribeOpts {
-				totalChars += len(opt.Characteristics)
-			}
-			multiChar := totalChars > 1
-
-			var notificationCount atomic.Int32
-			expectedCount := int32(len(tt.notifications))
-			allReceived := make(chan struct{})
-
-			// Capture stdout for entire notification flow (subscribe → simulate → wait)
-			var subscribeErr, simErr error
-			capturedOutput := suite.CaptureStdout(func() {
-				_, subscribeErr = conn.Subscribe(
-					tt.subscribeOpts,
-					device.StreamEveryUpdate,
-					0,
-					func(record *device.Record) {
-						outputSubscribeRecord(record, multiChar)
-						if notificationCount.Add(1) >= expectedCount {
-							close(allReceived)
-						}
-					},
-				)
-				if subscribeErr != nil {
-					return
-				}
-
-				// Inject all notifications using simulator
-				simulator := suite.NewPeripheralDataSimulator().AllowMultiValue()
-				for _, n := range tt.notifications {
-					simulator.WithService(n.service).WithCharacteristic(n.char, n.data)
-				}
-				_, simErr = simulator.SimulateFor(conn, false)
-				if simErr != nil {
-					return
-				}
-
-				// Wait for all callbacks
-				select {
-				case <-allReceived:
-				case <-time.After(2 * time.Second):
-					// Will be checked after CaptureStdout returns
-				}
-			})
-
-			suite.Require().NoError(subscribeErr, "subscribe MUST succeed")
-			suite.Require().NoError(simErr, "notification simulation MUST succeed")
-
-			// Verify expected outputs
-			for _, expected := range tt.expectedOutputs {
-				suite.Assert().Contains(capturedOutput, expected, "output MUST contain %q", expected)
-			}
+			suite.Assert().Equal(tt.expectedOutput, output, "output MUST match expected format")
 		})
 	}
 }

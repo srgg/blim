@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"sort"
@@ -49,13 +50,14 @@ Examples:
 }
 
 var (
-	subscribeServiceUUID string
-	subscribeCharUUIDs   string // comma-separated
-	subscribeHex         bool
-	subscribeTimeout     time.Duration
-	subscribeMode        string
-	subscribeRate        time.Duration
-	subscribeIndicate    bool
+	subscribeServiceUUID   string
+	subscribeCharUUIDs     string // comma-separated
+	subscribeHex           bool
+	subscribeTimeout       time.Duration
+	subscribeMode          string
+	subscribeRate          time.Duration
+	subscribeIndicate      bool
+	subscribeDrainDuration time.Duration
 )
 
 func init() {
@@ -66,6 +68,7 @@ func init() {
 	subscribeCmd.Flags().StringVar(&subscribeMode, "mode", "live", "Stream mode: live, batched, or latest")
 	subscribeCmd.Flags().DurationVar(&subscribeRate, "rate", 1*time.Second, "Rate limit interval for batched/latest modes")
 	subscribeCmd.Flags().BoolVar(&subscribeIndicate, "indicate", false, "Use indications instead of notifications")
+	subscribeCmd.Flags().DurationVar(&subscribeDrainDuration, "drain", 0, "Discard stale cached values for this duration (e.g., 200ms); no discard by default")
 }
 
 // parseStreamMode converts CLI mode string to device.StreamMode
@@ -149,6 +152,9 @@ func runSubscribe(cmd *cobra.Command, args []string) error {
 	// All arguments validated - don't show usage on runtime errors
 	cmd.SilenceUsage = true
 
+	// Get output writer from command
+	out := cmd.OutOrStdout()
+
 	// Setup context with signal handling
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -229,8 +235,9 @@ func runSubscribe(cmd *cobra.Command, args []string) error {
 			subscribeOpts,
 			streamMode,
 			rate,
+			subscribeDrainDuration,
 			func(record *device.Record) {
-				outputSubscribeRecord(record, multiChar)
+				outputSubscribeRecord(out, record, multiChar)
 			},
 		)
 		if err != nil {
@@ -245,7 +252,7 @@ func runSubscribe(cmd *cobra.Command, args []string) error {
 			return nil, nil
 		case <-connCtx.Done():
 			// Connection lost
-			return nil, ErrConnectionLost
+			return nil, device.ErrConnectionLost
 		}
 	}
 
@@ -255,7 +262,7 @@ func runSubscribe(cmd *cobra.Command, args []string) error {
 
 // outputSubscribeRecord formats and outputs a subscription record.
 // Keys are sorted for deterministic output order.
-func outputSubscribeRecord(record *device.Record, multiChar bool) {
+func outputSubscribeRecord(w io.Writer, record *device.Record, multiChar bool) {
 	printValue := func(charUUID string, data []byte) {
 		var prefix string
 		if multiChar {
@@ -263,13 +270,13 @@ func outputSubscribeRecord(record *device.Record, multiChar bool) {
 		}
 
 		if subscribeHex {
-			fmt.Printf("%s%s\n", prefix, hex.EncodeToString(data))
+			fmt.Fprintf(w, "%s%s\n", prefix, hex.EncodeToString(data))
 		} else {
 			if prefix != "" {
-				fmt.Print(prefix)
+				fmt.Fprint(w, prefix)
 			}
-			_, _ = os.Stdout.Write(data)
-			fmt.Println()
+			_, _ = w.Write(data)
+			fmt.Fprintln(w)
 		}
 	}
 

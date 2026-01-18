@@ -4,6 +4,7 @@ package testutils
 
 import (
 	"encoding/json"
+	"fmt"
 
 	"github.com/srg/blim/internal/device"
 )
@@ -155,4 +156,149 @@ func DeviceToJSON(d device.Device) string {
 	}
 
 	return string(b) // convert []byte to string
+}
+
+type DeviceRecordJSON struct {
+	*device.Record
+}
+
+func (r DeviceRecordJSON) MarshalJSON() ([]byte, error) {
+	obj := make(map[string]interface{})
+
+	// RecordMeta
+	obj["TsUs"] = r.Record.TsUs
+	obj["Seq"] = r.Record.Seq
+	obj["Flags"] = r.Record.Flags
+
+	// Values
+	values := make(map[string][]string)
+	for k, v := range r.Record.Values {
+		hexSlice := make([]string, len(v))
+		for i, by := range v {
+			hexSlice[i] = fmt.Sprintf("0x%02x", by)
+		}
+		values[k] = hexSlice
+	}
+	obj["Values"] = values
+
+	// BatchValues
+	batches := make(map[string][][]string)
+	for k, batch := range r.Record.BatchValues {
+		hexBatches := make([][]string, len(batch))
+		for i, b := range batch {
+			hexBatch := make([]string, len(b))
+			for j, by := range b {
+				hexBatch[j] = fmt.Sprintf("0x%02x", by)
+			}
+			hexBatches[i] = hexBatch
+		}
+		batches[k] = hexBatches
+	}
+	obj["BatchValues"] = batches
+
+	// Meta
+	if r.Record.Meta == nil {
+		obj["Meta"] = map[string][]*device.RecordMeta{}
+	} else {
+		obj["Meta"] = r.Record.Meta
+	}
+
+	return json.Marshal(obj)
+}
+
+func (r *DeviceRecordJSON) UnmarshalJSON(data []byte) error {
+	var obj map[string]interface{}
+	if err := json.Unmarshal(data, &obj); err != nil {
+		return err
+	}
+
+	// Initialize embedded Record if nil
+	if r.Record == nil {
+		r.Record = &device.Record{}
+	}
+
+	// ---- RecordMeta ----
+	if ts, ok := obj["TsUs"].(float64); ok {
+		r.TsUs = int64(ts)
+	}
+	if seq, ok := obj["Seq"].(float64); ok {
+		r.Seq = uint64(seq)
+	}
+	if flags, ok := obj["Flags"].(float64); ok {
+		r.Flags = uint32(flags)
+	}
+
+	// ---- Values ----
+	if valuesRaw, ok := obj["Values"].(map[string]interface{}); ok {
+		r.Values = make(map[string][]byte, len(valuesRaw))
+		for k, v := range valuesRaw {
+			switch val := v.(type) {
+			case string:
+				// Plain string value (e.g., "XYZ" from Lua callback)
+				r.Values[k] = []byte(val)
+			case []interface{}:
+				// Hex array (e.g., ["0x58", "0x59", "0x5a"] from YAML test)
+				bytes := make([]byte, len(val))
+				for i, hv := range val {
+					if hs, ok := hv.(string); ok {
+						b, err := parseHexByte(hs)
+						if err != nil {
+							return fmt.Errorf("invalid hex byte in Values[%s]: %v", k, err)
+						}
+						bytes[i] = b
+					}
+				}
+				r.Values[k] = bytes
+			}
+		}
+	}
+
+	if batchesRaw, ok := obj["BatchValues"].(map[string]interface{}); ok {
+		r.BatchValues = make(map[string][][]byte, len(batchesRaw))
+		for k, batchVal := range batchesRaw {
+			if batchArr, ok := batchVal.([]interface{}); ok {
+				batches := make([][]byte, len(batchArr))
+				for i, b := range batchArr {
+					// Handle raw string format from Lua: ["XYZ", "\u0001\u0002\u0003"]
+					if rawStr, ok := b.(string); ok {
+						batches[i] = []byte(rawStr)
+					} else if hexArr, ok := b.([]interface{}); ok {
+						// Handle hex array format from tests: [["0x58", "0x59"], ["0x01", "0x02"]]
+						bytes := make([]byte, len(hexArr))
+						for j, hv := range hexArr {
+							if hs, ok := hv.(string); ok {
+								b, err := parseHexByte(hs)
+								if err != nil {
+									return fmt.Errorf("invalid hex byte in BatchValues[%s][%d]: %v", k, i, err)
+								}
+								bytes[j] = b
+							}
+						}
+						batches[i] = bytes
+					}
+				}
+				r.BatchValues[k] = batches
+			}
+		}
+	}
+
+	// ---- Meta ----
+	if metaRaw, ok := obj["Meta"]; ok {
+		b, err := json.Marshal(metaRaw)
+		if err != nil {
+			return err
+		}
+		if err := json.Unmarshal(b, &r.Meta); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// ---- Helper: parse hex string like "0x1a" ----
+func parseHexByte(s string) (byte, error) {
+	var b byte
+	_, err := fmt.Sscanf(s, "0x%02x", &b)
+	return b, err
 }

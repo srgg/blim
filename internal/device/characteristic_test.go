@@ -9,12 +9,13 @@ import (
 	"time"
 
 	"github.com/srg/blim/internal/device"
+	"github.com/srg/blim/internal/testutils"
 	"github.com/srgg/testify/depend"
 )
 
-// CharacteristicTestSuite tests characteristic Read/Write operations using MockBLEPeripheralSuite
+// CharacteristicTestSuite tests characteristic Read/Write operations using MockBLEPeripheralSuite.
 type CharacteristicTestSuite struct {
-	DeviceTestSuite
+	DeviceTestSuite2
 }
 
 func (suite *CharacteristicTestSuite) TestCharacteristicRead() {
@@ -27,7 +28,8 @@ func (suite *CharacteristicTestSuite) TestCharacteristicRead() {
 		//
 		// TEST SCENARIO: Read characteristic with data → data returned → no error
 
-		char, err := suite.connection.GetCharacteristic("180f", "2a19")
+		dev := suite.Connect("12")
+		char, err := dev.GetConnection().GetCharacteristic("180f", "2a19")
 		suite.Require().NoError(err, "MUST find characteristic")
 
 		data, err := char.Read(5 * time.Second)
@@ -41,7 +43,8 @@ func (suite *CharacteristicTestSuite) TestCharacteristicRead() {
 		//
 		// TEST SCENARIO: Read characteristic with empty value → empty array returned → no error
 
-		char, err := suite.connection.GetCharacteristic("180f", "2a20")
+		dev := suite.Connect("12")
+		char, err := dev.GetConnection().GetCharacteristic("180f", "2a20")
 		suite.Require().NoError(err, "MUST find characteristic")
 
 		data, err := char.Read(5 * time.Second)
@@ -56,7 +59,8 @@ func (suite *CharacteristicTestSuite) TestCharacteristicRead() {
 		//
 		// TEST SCENARIO: Read twice → both return the same data → no errors
 
-		char, err := suite.connection.GetCharacteristic("180f", "2a19")
+		dev := suite.Connect("12")
+		char, err := dev.GetConnection().GetCharacteristic("180f", "2a19")
 		suite.Require().NoError(err, "MUST find characteristic")
 
 		data1, err1 := char.Read(5 * time.Second)
@@ -74,7 +78,8 @@ func (suite *CharacteristicTestSuite) TestCharacteristicRead() {
 		//
 		// TEST SCENARIO: Read from write-only characteristic → error returned → error wraps device.ErrUnsupported
 
-		char, err := suite.connection.GetCharacteristic("180d", "2a39")
+		dev := suite.Connect("12")
+		char, err := dev.GetConnection().GetCharacteristic("180d", "2a39")
 		suite.Require().NoError(err, "MUST find characteristic")
 
 		_, err = char.Read(5 * time.Second)
@@ -90,11 +95,12 @@ func (suite *CharacteristicTestSuite) TestCharacteristicRead() {
 		//
 		// TEST SCENARIO: Get characteristic → disconnect device → attempt read → ErrNotConnected returned
 
-		char, err := suite.connection.GetCharacteristic("180f", "2a19")
+		dev := suite.Connect("12")
+		char, err := dev.GetConnection().GetCharacteristic("180f", "2a19")
 		suite.Require().NoError(err, "MUST find characteristic")
 
 		// Disconnect the device
-		err = suite.device.Disconnect()
+		err = dev.Disconnect()
 		suite.Require().NoError(err, "disconnect MUST succeed")
 
 		// Attempt to read while disconnected
@@ -109,8 +115,8 @@ func (suite *CharacteristicTestSuite) TestCharacteristicRead() {
 		// GOAL: Verify ErrTimeout is returned when read operation times out
 		//
 		// TEST SCENARIO: Read characteristic with 1s delay using 500ms timeout → ErrTimeout returned
-
-		char, err := suite.connection.GetCharacteristic("180d", "2a41")
+		dev := suite.Connect("12")
+		char, err := dev.GetConnection().GetCharacteristic("180d", "2a41")
 		suite.Require().NoError(err, "MUST find characteristic")
 
 		// Attempt to read with timeout shorter than the mock delay (1s)
@@ -133,7 +139,8 @@ func (suite *CharacteristicTestSuite) TestCharacteristicWrite() {
 		//
 		// TEST SCENARIO: Write data with response → operation succeeds → no error
 
-		char, err := suite.connection.GetCharacteristic("180d", "2a39")
+		dev := suite.Connect("12")
+		char, err := dev.GetConnection().GetCharacteristic("180d", "2a39")
 		suite.Require().NoError(err, "MUST find characteristic")
 
 		err = char.Write([]byte{0x01, 0x02, 0x03}, true, 5*time.Second)
@@ -146,7 +153,8 @@ func (suite *CharacteristicTestSuite) TestCharacteristicWrite() {
 		//
 		// TEST SCENARIO: Write data without response → operation succeeds → no error
 
-		char, err := suite.connection.GetCharacteristic("180d", "2a39")
+		dev := suite.Connect("12")
+		char, err := dev.GetConnection().GetCharacteristic("180d", "2a39")
 		suite.Require().NoError(err, "MUST find characteristic")
 
 		err = char.Write([]byte{0xFF, 0xFE}, false, 5*time.Second)
@@ -159,7 +167,8 @@ func (suite *CharacteristicTestSuite) TestCharacteristicWrite() {
 		//
 		// TEST SCENARIO: Write an empty array → operation succeeds → no error
 
-		char, err := suite.connection.GetCharacteristic("180d", "2a39")
+		dev := suite.Connect("12")
+		char, err := dev.GetConnection().GetCharacteristic("180d", "2a39")
 		suite.Require().NoError(err, "MUST find characteristic")
 
 		err = char.Write([]byte{}, true, 5*time.Second)
@@ -172,7 +181,8 @@ func (suite *CharacteristicTestSuite) TestCharacteristicWrite() {
 		//
 		// TEST SCENARIO: Write 512 bytes → operation succeeds → no error
 
-		char, err := suite.connection.GetCharacteristic("180d", "2a39")
+		dev := suite.Connect("12")
+		char, err := dev.GetConnection().GetCharacteristic("180d", "2a39")
 		suite.Require().NoError(err, "MUST find characteristic")
 
 		largeData := make([]byte, 512)
@@ -190,7 +200,8 @@ func (suite *CharacteristicTestSuite) TestCharacteristicWrite() {
 		//
 		// TEST SCENARIO: Write three times sequentially → all succeed → no errors
 
-		char, err := suite.connection.GetCharacteristic("180d", "2a39")
+		dev := suite.Connect("12")
+		char, err := dev.GetConnection().GetCharacteristic("180d", "2a39")
 		suite.Require().NoError(err, "MUST find characteristic")
 
 		err1 := char.Write([]byte{0x01}, true, 5*time.Second)
@@ -207,7 +218,8 @@ func (suite *CharacteristicTestSuite) TestCharacteristicWrite() {
 		//
 		// TEST SCENARIO: Write to read-only characteristic → error returned → error wraps device.ErrUnsupported
 
-		char, err := suite.connection.GetCharacteristic("180f", "2a19")
+		dev := suite.Connect("12")
+		char, err := dev.GetConnection().GetCharacteristic("180f", "2a19")
 		suite.Require().NoError(err, "MUST find characteristic")
 
 		err = char.Write([]byte{0x01}, true, 5*time.Second)
@@ -223,7 +235,8 @@ func (suite *CharacteristicTestSuite) TestCharacteristicWrite() {
 		//
 		// TEST SCENARIO: Write with response requested → only write-without-response available → operation succeeds
 
-		char, err := suite.connection.GetCharacteristic("180d", "2a39")
+		dev := suite.Connect("12")
+		char, err := dev.GetConnection().GetCharacteristic("180d", "2a39")
 		suite.Require().NoError(err, "MUST find characteristic")
 
 		// Request write with response, but characteristic only supports write-without-response
@@ -237,12 +250,13 @@ func (suite *CharacteristicTestSuite) TestCharacteristicWrite() {
 		// GOAL: Verify ErrNotConnected is returned when writing to disconnected device
 		//
 		// TEST SCENARIO: Get characteristic → disconnect device → attempt write → ErrNotConnected returned
+		dev := suite.Connect("12")
 
-		char, err := suite.connection.GetCharacteristic("180d", "2a39")
+		char, err := dev.GetConnection().GetCharacteristic("180d", "2a39")
 		suite.Require().NoError(err, "MUST find characteristic")
 
 		// Disconnect the device
-		err = suite.device.Disconnect()
+		err = dev.Disconnect()
 		suite.Require().NoError(err, "disconnect MUST succeed")
 
 		// Attempt to write while disconnected
@@ -257,8 +271,9 @@ func (suite *CharacteristicTestSuite) TestCharacteristicWrite() {
 		// GOAL: Verify ErrTimeout is returned when write operation times out
 		//
 		// TEST SCENARIO: Write characteristic with 1s delay using 500ms timeout → ErrTimeout returned
+		dev := suite.Connect("12")
 
-		char, err := suite.connection.GetCharacteristic("180d", "2a42")
+		char, err := dev.GetConnection().GetCharacteristic("180d", "2a42")
 		suite.Require().NoError(err, "MUST find characteristic")
 
 		// Attempt to write with timeout shorter than the mock delay (1s)
@@ -281,7 +296,8 @@ func (suite *CharacteristicTestSuite) TestCharacteristicReadWrite() {
 		//
 		// TEST SCENARIO: Read initial value then write → both succeed → no errors
 
-		char, err := suite.connection.GetCharacteristic("180d", "2a40")
+		dev := suite.Connect("12")
+		char, err := dev.GetConnection().GetCharacteristic("180d", "2a40")
 		suite.Require().NoError(err, "MUST find characteristic")
 
 		initialData, readErr := char.Read(5 * time.Second)
@@ -303,7 +319,8 @@ func (suite *CharacteristicTestSuite) TestCharacteristicKnownName() {
 		//
 		// TEST SCENARIO: Get characteristic 2a19 → check KnownName() → returns "Battery Level"
 
-		char, err := suite.connection.GetCharacteristic("180f", "2a19")
+		dev := suite.Connect("12")
+		char, err := dev.GetConnection().GetCharacteristic("180f", "2a19")
 		suite.Require().NoError(err, "MUST find characteristic")
 
 		knownName := char.KnownName()
@@ -314,8 +331,9 @@ func (suite *CharacteristicTestSuite) TestCharacteristicKnownName() {
 		// GOAL: Verify Heart Rate Measurement characteristic has correct known name
 		//
 		// TEST SCENARIO: Get characteristic 2a37 → check KnownName() → returns "Heart Rate Measurement"
+		dev := suite.Connect("12")
 
-		char, err := suite.connection.GetCharacteristic("180d", "2a37")
+		char, err := dev.GetConnection().GetCharacteristic("180d", "2a37")
 		suite.Require().NoError(err, "MUST find characteristic")
 
 		knownName := char.KnownName()
@@ -326,8 +344,9 @@ func (suite *CharacteristicTestSuite) TestCharacteristicKnownName() {
 		// GOAL: Verify unknown/custom characteristic UUIDs return empty known name
 		//
 		// TEST SCENARIO: Get characteristic with unknown UUID (ffff) → check KnownName() → returns empty string
+		dev := suite.Connect("12")
 
-		char, err := suite.connection.GetCharacteristic("180d", "ffff")
+		char, err := dev.GetConnection().GetCharacteristic("180d", "ffff")
 		suite.Require().NoError(err, "MUST find characteristic")
 
 		knownName := char.KnownName()
@@ -345,7 +364,8 @@ func (suite *CharacteristicTestSuite) TestCharacteristicParserAPI() {
 		//
 		// TEST SCENARIO: Get Appearance characteristic (has parser) → HasParser() returns true
 
-		char, err := suite.connection.GetCharacteristic("1800", "2a01")
+		dev := suite.Connect("12")
+		char, err := dev.GetConnection().GetCharacteristic("1800", "2a01")
 		suite.Require().NoError(err, "MUST find Appearance characteristic")
 
 		hasParser := char.HasParser()
@@ -357,7 +377,8 @@ func (suite *CharacteristicTestSuite) TestCharacteristicParserAPI() {
 		//
 		// TEST SCENARIO: Get Battery Level characteristic (no parser) → HasParser() returns false
 
-		char, err := suite.connection.GetCharacteristic("180f", "2a19")
+		dev := suite.Connect("12")
+		char, err := dev.GetConnection().GetCharacteristic("180f", "2a19")
 		suite.Require().NoError(err, "MUST find Battery Level characteristic")
 
 		hasParser := char.HasParser()
@@ -369,7 +390,8 @@ func (suite *CharacteristicTestSuite) TestCharacteristicParserAPI() {
 		//
 		// TEST SCENARIO: Get custom characteristic → HasParser() returns false
 
-		char, err := suite.connection.GetCharacteristic("180d", "ffff")
+		dev := suite.Connect("12")
+		char, err := dev.GetConnection().GetCharacteristic("180d", "ffff")
 		suite.Require().NoError(err, "MUST find custom characteristic")
 
 		hasParser := char.HasParser()
@@ -380,8 +402,9 @@ func (suite *CharacteristicTestSuite) TestCharacteristicParserAPI() {
 		// GOAL: Verify ParseValue() routes to correct parser implementation
 		//
 		// TEST SCENARIO: Get characteristic with parser → call ParseValue() → parser is invoked and returns result
+		dev := suite.Connect("12")
 
-		char, err := suite.connection.GetCharacteristic("1800", "2a01")
+		char, err := dev.GetConnection().GetCharacteristic("1800", "2a01")
 		suite.Require().NoError(err, "MUST find Appearance characteristic")
 
 		value, err := char.Read(5 * time.Second)
@@ -397,7 +420,8 @@ func (suite *CharacteristicTestSuite) TestCharacteristicParserAPI() {
 		//
 		// TEST SCENARIO: Get characteristic without parser → call ParseValue() → returns (nil, nil)
 
-		char, err := suite.connection.GetCharacteristic("180f", "2a19")
+		dev := suite.Connect("12")
+		char, err := dev.GetConnection().GetCharacteristic("180f", "2a19")
 		suite.Require().NoError(err, "MUST find Battery Level characteristic")
 
 		value, err := char.Read(5 * time.Second)
@@ -412,8 +436,9 @@ func (suite *CharacteristicTestSuite) TestCharacteristicParserAPI() {
 		// GOAL: Verify HasParser() returns consistent results across multiple calls
 		//
 		// TEST SCENARIO: Call HasParser() multiple times → all return same value
+		dev := suite.Connect("12")
 
-		char, err := suite.connection.GetCharacteristic("1800", "2a01")
+		char, err := dev.GetConnection().GetCharacteristic("1800", "2a01")
 		suite.Require().NoError(err, "MUST find Appearance characteristic")
 
 		result1 := char.HasParser()
@@ -429,8 +454,9 @@ func (suite *CharacteristicTestSuite) TestCharacteristicParserAPI() {
 		// GOAL: Verify ParseValue() returns consistent results across multiple calls
 		//
 		// TEST SCENARIO: Call ParseValue() multiple times with same data → all return same result
+		dev := suite.Connect("12")
 
-		char, err := suite.connection.GetCharacteristic("1800", "2a01")
+		char, err := dev.GetConnection().GetCharacteristic("1800", "2a01")
 		suite.Require().NoError(err, "MUST find Appearance characteristic")
 
 		value, err := char.Read(5 * time.Second)
@@ -458,15 +484,14 @@ func (suite *CharacteristicTestSuite) TestRequiresAuthentication() {
 		//
 		// TEST SCENARIO: Characteristic with authenticated_signed_writes property → RequiresAuthentication() returns true
 
-		suite.WithPeripheral().
-			WithService("1234").
-			WithCharacteristic("5678", "authenticated_signed_writes", []byte{0x01})
+		suite.GivenPeripheral(func(b *testutils.PeripheralDeviceBuilder) {
+			b.
+				WithService("1234").
+				WithCharacteristic("5678", "authenticated_signed_writes", []byte{0x01})
+		})
 
-		err := suite.device.Disconnect()
-		suite.Require().NoError(err, "disconnect MUST succeed")
-		suite.ensureConnected()
-
-		char, err := suite.connection.GetCharacteristic("1234", "5678")
+		dev := suite.Connect("12")
+		char, err := dev.GetConnection().GetCharacteristic("1234", "5678")
 		suite.Require().NoError(err, "MUST find characteristic")
 
 		requiresAuth := char.RequiresAuthentication()
@@ -482,15 +507,14 @@ func (suite *CharacteristicTestSuite) TestRequiresAuthentication() {
 		// the OS hides characteristic properties (returns 0) until pairing completes.
 		// This is a common indicator that authentication is required.
 
-		suite.WithPeripheral().
-			WithService("1234").
-			WithCharacteristicNoProperties("ABCD", []byte{0x01})
+		suite.GivenPeripheral(func(b *testutils.PeripheralDeviceBuilder) {
+			b.
+				WithService("1234").
+				WithCharacteristicNoProperties("ABCD", []byte{0x01})
+		})
 
-		err := suite.device.Disconnect()
-		suite.Require().NoError(err, "disconnect MUST succeed")
-		suite.ensureConnected()
-
-		char, err := suite.connection.GetCharacteristic("1234", "ABCD")
+		dev := suite.Connect("12")
+		char, err := dev.GetConnection().GetCharacteristic("1234", "ABCD")
 		suite.Require().NoError(err, "MUST find characteristic")
 
 		requiresAuth := char.RequiresAuthentication()
@@ -501,8 +525,9 @@ func (suite *CharacteristicTestSuite) TestRequiresAuthentication() {
 		// GOAL: Verify RequiresAuthentication() returns false for standard readable characteristics
 		//
 		// TEST SCENARIO: Characteristic with read property → RequiresAuthentication() returns false
+		dev := suite.Connect("12")
 
-		char, err := suite.connection.GetCharacteristic("180f", "2a19")
+		char, err := dev.GetConnection().GetCharacteristic("180f", "2a19")
 		suite.Require().NoError(err, "MUST find Battery Level characteristic")
 
 		requiresAuth := char.RequiresAuthentication()
@@ -513,8 +538,9 @@ func (suite *CharacteristicTestSuite) TestRequiresAuthentication() {
 		// GOAL: Verify RequiresAuthentication() returns false for read/write characteristics
 		//
 		// TEST SCENARIO: Characteristic with read,write properties → RequiresAuthentication() returns false
+		dev := suite.Connect("12")
 
-		char, err := suite.connection.GetCharacteristic("180d", "2a40")
+		char, err := dev.GetConnection().GetCharacteristic("180d", "2a40")
 		suite.Require().NoError(err, "MUST find read/write characteristic")
 
 		requiresAuth := char.RequiresAuthentication()
@@ -525,8 +551,9 @@ func (suite *CharacteristicTestSuite) TestRequiresAuthentication() {
 		// GOAL: Verify RequiresAuthentication() returns false for notification characteristics
 		//
 		// TEST SCENARIO: Characteristic with notify property → RequiresAuthentication() returns false
+		dev := suite.Connect("12")
 
-		char, err := suite.connection.GetCharacteristic("180d", "2a37")
+		char, err := dev.GetConnection().GetCharacteristic("180d", "2a37")
 		suite.Require().NoError(err, "MUST find Heart Rate Measurement characteristic")
 
 		requiresAuth := char.RequiresAuthentication()
@@ -537,8 +564,9 @@ func (suite *CharacteristicTestSuite) TestRequiresAuthentication() {
 		// GOAL: Verify RequiresAuthentication() returns false for write-only characteristics
 		//
 		// TEST SCENARIO: Characteristic with write property → RequiresAuthentication() returns false
+		dev := suite.Connect("12")
 
-		char, err := suite.connection.GetCharacteristic("180d", "2a39")
+		char, err := dev.GetConnection().GetCharacteristic("180d", "2a39")
 		suite.Require().NoError(err, "MUST find write-only characteristic")
 
 		requiresAuth := char.RequiresAuthentication()
@@ -557,8 +585,9 @@ func (suite *CharacteristicTestSuite) TestWellKnownCharacteristicParsers() {
 			// GOAL: Verify Appearance parser correctly parses known appearance codes
 			//
 			// TEST SCENARIO: Read Appearance characteristic with value 0x0040 → ParseValue() returns "Phone"
+			dev := suite.Connect("12")
 
-			char, err := suite.connection.GetCharacteristic("1800", "2a01")
+			char, err := dev.GetConnection().GetCharacteristic("1800", "2a01")
 			suite.Require().NoError(err, "MUST find Appearance characteristic")
 
 			value, err := char.Read(5 * time.Second)
@@ -575,16 +604,14 @@ func (suite *CharacteristicTestSuite) TestWellKnownCharacteristicParsers() {
 			// TEST SCENARIO: Read Appearance with unknown value 0xFFFF → ParseValue() returns (nil, nil)
 
 			// Create peripheral with unknown appearance value
-			suite.WithPeripheral().
-				WithService("1800").
-				WithCharacteristic("2a01", "read", []byte{0xFF, 0xFF})
+			suite.GivenPeripheral(func(b *testutils.PeripheralDeviceBuilder) {
+				b.
+					WithService("1800").
+					WithCharacteristic("2a01", "read", []byte{0xFF, 0xFF})
+			})
+			dev := suite.Connect("12")
 
-			// Reconnect to apply new peripheral
-			err := suite.device.Disconnect()
-			suite.Require().NoError(err, "disconnect MUST succeed")
-			suite.ensureConnected()
-
-			char, err := suite.connection.GetCharacteristic("1800", "2a01")
+			char, err := dev.GetConnection().GetCharacteristic("1800", "2a01")
 			suite.Require().NoError(err, "MUST find Appearance characteristic")
 
 			value, err := char.Read(5 * time.Second)
@@ -599,8 +626,9 @@ func (suite *CharacteristicTestSuite) TestWellKnownCharacteristicParsers() {
 			// GOAL: Verify Appearance parser validates data length (2 bytes required)
 			//
 			// TEST SCENARIO: Call ParseValue() with 1 byte → returns error
+			dev := suite.Connect("12")
 
-			char, err := suite.connection.GetCharacteristic("1800", "2a01")
+			char, err := dev.GetConnection().GetCharacteristic("1800", "2a01")
 			suite.Require().NoError(err, "MUST find Appearance characteristic")
 
 			parsed, err := char.ParseValue([]byte{0x40})
@@ -613,8 +641,9 @@ func (suite *CharacteristicTestSuite) TestWellKnownCharacteristicParsers() {
 			// GOAL: Verify Appearance parser rejects empty data
 			//
 			// TEST SCENARIO: Call ParseValue() with empty slice → returns error
+			dev := suite.Connect("12")
 
-			char, err := suite.connection.GetCharacteristic("1800", "2a01")
+			char, err := dev.GetConnection().GetCharacteristic("1800", "2a01")
 			suite.Require().NoError(err, "MUST find Appearance characteristic")
 
 			parsed, err := char.ParseValue([]byte{})
@@ -627,8 +656,9 @@ func (suite *CharacteristicTestSuite) TestWellKnownCharacteristicParsers() {
 			// GOAL: Verify Appearance parser rejects nil data
 			//
 			// TEST SCENARIO: Call ParseValue() with nil → returns error
+			dev := suite.Connect("12")
 
-			char, err := suite.connection.GetCharacteristic("1800", "2a01")
+			char, err := dev.GetConnection().GetCharacteristic("1800", "2a01")
 			suite.Require().NoError(err, "MUST find Appearance characteristic")
 
 			parsed, err := char.ParseValue(nil)
@@ -641,8 +671,9 @@ func (suite *CharacteristicTestSuite) TestWellKnownCharacteristicParsers() {
 			// GOAL: Verify Appearance parser validates exact length requirement
 			//
 			// TEST SCENARIO: Call ParseValue() with 3 bytes → returns error
+			dev := suite.Connect("12")
 
-			char, err := suite.connection.GetCharacteristic("1800", "2a01")
+			char, err := dev.GetConnection().GetCharacteristic("1800", "2a01")
 			suite.Require().NoError(err, "MUST find Appearance characteristic")
 
 			parsed, err := char.ParseValue([]byte{0x40, 0x00, 0xFF})
@@ -655,6 +686,5 @@ func (suite *CharacteristicTestSuite) TestWellKnownCharacteristicParsers() {
 
 // TestCharacteristicTestSuite runs the test suite
 func TestCharacteristicTestSuite(t *testing.T) {
-	//suite.Run(t, new(CharacteristicTestSuite))
 	depend.RunSuite(t, new(CharacteristicTestSuite))
 }

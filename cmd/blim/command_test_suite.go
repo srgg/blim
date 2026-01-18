@@ -8,7 +8,6 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
-	"github.com/srg/blim/internal/device"
 	"github.com/srg/blim/internal/testutils"
 )
 
@@ -21,17 +20,7 @@ const (
 // CommandTestSuite extends MockBLEPeripheralSuite with command testing utilities.
 // All cmd/blim test suites should embed this instead of MockBLEPeripheralSuite.
 type CommandTestSuite struct {
-	testutils.MockBLEPeripheralSuite
-}
-
-// ConnectDevice connects to mock device and returns cleanup function.
-// Uses TestDeviceAddress1 if address is empty.
-// DrainDuration is set to 0 via OnConnected (mocks don't have CoreBluetooth cached values to drain).
-func (s *CommandTestSuite) ConnectDevice(address string) (device.Device, func()) {
-	if address == "" {
-		address = TestDeviceAddress1
-	}
-	return s.MockBLEPeripheralSuite.ConnectDevice(address, nil)
+	testutils.PeripheralDeviceSuite
 }
 
 // CaptureStdout executes fn while capturing stdout, returns captured output.

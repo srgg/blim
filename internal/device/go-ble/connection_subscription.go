@@ -15,45 +15,60 @@ import (
 // Subscription
 // ----------------------------
 
+// maxDrainIterations is the safety limit to prevent infinite spin
+// if the sender is still active
+const maxDrainIterations = 1000
+
 // drainChannel removes and releases all pending values from a BLEValue channel.
 // This is used to discard any cached values that CoreBluetooth delivers when
 // notifications are first enabled via SetNotify(true). These are stale cached
 // values from discovery, not real-time notifications.
-func drainChannel(ch chan *BLEValue) {
-	for {
+func drainChannel(ch chan *BLEValue) int {
+	count := 0
+	for count < maxDrainIterations {
 		select {
 		case val := <-ch:
-			val.release() // Return to pool
+			val.release()
+			count++
 		default:
-			return // Channel empty
+			return count
 		}
 	}
+	return count
 }
 
 func newRecord(mode device.StreamMode) *device.Record {
 	r := &device.Record{
-		TsUs: time.Now().UnixMicro(),
+		RecordMeta: device.RecordMeta{
+			TsUs: time.Now().UnixMicro(),
+		},
 	}
-	if mode == device.StreamBatched {
+
+	switch mode {
+	case device.StreamBatched:
 		r.BatchValues = make(map[string][][]byte)
-	} else {
+	default:
 		r.Values = make(map[string][]byte)
 	}
+
 	return r
 }
 
 type Subscription struct {
-	Name     string // Identifier for logging (user-provided or auto-generated)
-	Chars    []*BLECharacteristic
-	Mode     device.StreamMode
-	MaxRate  time.Duration
-	Callback func(*device.Record)
+	Name          string // Identifier for logging (user-provided or auto-generated)
+	Chars         []*BLECharacteristic
+	Mode          device.StreamMode
+	MaxRate       time.Duration
+	DrainDuration time.Duration // Max wait to discard stale cached values before delivering fresh notifications
+	Callback      func(*device.Record)
 
 	ctx    context.Context
 	cancel context.CancelFunc
 
 	// Per-subscription channel for broadcast delivery from fan-out goroutines
 	updates chan *BLEValue
+
+	Diag *SubscriptionDiagnostics // nil in production, populated in test
 }
 
 // ----------------------------
@@ -81,7 +96,7 @@ func (m *SubscriptionManager) Add(sub *Subscription, runner func(*Subscription))
 	m.mu.Lock()
 	m.subscriptions = append(m.subscriptions, sub)
 	idx := len(m.subscriptions)
-	// Use provided name or auto-generate
+	// Use the provided name or auto-generate
 	if sub.Name == "" {
 		sub.Name = fmt.Sprintf("sub-%d", idx)
 	}
@@ -123,20 +138,34 @@ func (m *SubscriptionManager) Done() {
 	m.wg.Done()
 }
 
+// GetByName returns the subscription with the given name, or nil if not found.
+func (m *SubscriptionManager) GetByName(name string) *Subscription {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, sub := range m.subscriptions {
+		if sub.Name == name {
+			return sub
+		}
+	}
+	return nil
+}
+
 // ----------------------------
 // Fan-out Methods (on BLECharacteristic)
 // ----------------------------
 
 // registerSubscriber adds a channel to the fan-out registry for a subscription.
 // Starts the fan-out goroutine on the first subscriber (reference-counted lifecycle).
-func (c *BLECharacteristic) registerSubscriber(ch chan *BLEValue) {
+// Returns true if this was the first subscriber (i.e., we started the fan-out).
+func (c *BLECharacteristic) registerSubscriber(ch chan *BLEValue) bool {
 	c.subChannelsMu.Lock()
 	defer c.subChannelsMu.Unlock()
 
+	isFirst := len(c.subChannels) == 0
 	c.subChannels = append(c.subChannels, ch)
 
 	// Start fan-out goroutine on first subscriber
-	if len(c.subChannels) == 1 {
+	if isFirst {
 		// Parent context ensures fan-out exits on connection disconnect
 		parentCtx := context.Background()
 		if c.connection != nil && c.connection.ctx != nil {
@@ -147,6 +176,7 @@ func (c *BLECharacteristic) registerSubscriber(ch chan *BLEValue) {
 			c.runFanOut(ctx)
 		})
 	}
+	return isFirst
 }
 
 // unregisterSubscriber removes a subscription's channel from the fan-out registry.
@@ -162,7 +192,7 @@ func (c *BLECharacteristic) unregisterSubscriber(ch chan *BLEValue) {
 		}
 	}
 
-	// Stop fan-out goroutine when last subscriber leaves
+	// Stop fan-out goroutine when the last subscriber leaves
 	if len(c.subChannels) == 0 && c.fanOutCancel != nil {
 		c.fanOutCancel()
 		c.fanOutCancel = nil
@@ -231,19 +261,20 @@ func (c *BLECharacteristic) runFanOut(ctx context.Context) {
 
 // Subscribe subscribes to notifications with an auto-generated name.
 // See SubscribeWithName for full documentation.
-func (c *BLEConnection) Subscribe(opts []*device.SubscribeOptions, mode device.StreamMode, maxRate time.Duration, callback func(*device.Record)) (func(), error) {
-	return c.SubscribeWithName("", opts, mode, maxRate, callback)
+func (c *BLEConnection) Subscribe(opts []*device.SubscribeOptions, mode device.StreamMode, maxRate time.Duration, drainDuration time.Duration, callback func(*device.Record)) (func(), error) {
+	return c.SubscribeWithName("", opts, mode, maxRate, drainDuration, callback)
 }
 
 // SubscribeWithName subscribes to notifications from multiple services and characteristics with streaming patterns.
 // The name parameter is used for logging; if empty, an auto-generated name is used.
+// drainDuration specifies how long to wait discarding stale cached values before delivering fresh notifications.
 //
 // Supports advanced subscription with streaming patterns and callbacks:
 //
 //	connection.SubscribeWithName("heartrate", []*device.SubscribeOptions{
 //	  { Service: "0000180d-0000-1000-8000-00805f9b34fb", Characteristics: []string{"00002a37-0000-1000-8000-00805f9b34fb"} },
-//	}, device.StreamEveryUpdate, 0, func(record *device.Record) { ... })
-func (c *BLEConnection) SubscribeWithName(name string, opts []*device.SubscribeOptions, mode device.StreamMode, maxRate time.Duration, callback func(*device.Record)) (func(), error) {
+//	}, device.StreamEveryUpdate, 0, 500*time.Millisecond, func(record *device.Record) { ... })
+func (c *BLEConnection) SubscribeWithName(name string, opts []*device.SubscribeOptions, mode device.StreamMode, maxRate time.Duration, drainDuration time.Duration, callback func(*device.Record)) (func(), error) {
 	// Error prefix for this subscription
 	errPrefix := "subscription"
 	if name != "" {
@@ -316,25 +347,38 @@ func (c *BLEConnection) SubscribeWithName(name string, opts []*device.SubscribeO
 		return nil, fmt.Errorf("%s: %w", errPrefix, device.ErrNotConnected)
 	}
 
+	// Create a subscription with diagnostics (nil in production)
 	sub := &Subscription{
-		Name:     name,
-		Chars:    allCharacteristics,
-		Mode:     mode,
-		MaxRate:  maxRate,
-		Callback: callback,
-		updates:  make(chan *BLEValue, DefaultChannelBuffer),
+		Name:          name,
+		Chars:         allCharacteristics,
+		Mode:          mode,
+		MaxRate:       maxRate,
+		DrainDuration: drainDuration,
+		Callback:      callback,
+		updates:       make(chan *BLEValue, DefaultChannelBuffer),
+		Diag:          newSubscriptionDiagnostics(allCharacteristics),
 	}
 	sub.ctx, sub.cancel = context.WithCancel(c.ctx)
 
 	// Register with each characteristic for fan-out broadcast
 	for _, char := range allCharacteristics {
-		char.registerSubscriber(sub.updates)
+		isFirst := char.registerSubscriber(sub.updates)
+		if isFirst {
+			sub.Diag.MarkFirstSubscriber(char.UUID()) // safe even if Diag nil
+		}
 	}
+
+	// Set references for cancel verification
+	sub.Diag.SetReferences(sub, c)
+
+	// Track subscription at connection level
+	c.ConnDiag.TrackSubscription(sub)
 
 	// Add subscription to manager and start goroutine
 	c.subMgr.Add(sub, c.runSubscription)
 
-	return sub.cancel, nil
+	// Return wrapped cancel (no-op wrapper in prod, verification in test)
+	return wrapCancelFunc(sub.Diag, sub.cancel), nil
 }
 
 func (c *BLEConnection) runSubscription(sub *Subscription) {
@@ -345,38 +389,72 @@ func (c *BLEConnection) runSubscription(sub *Subscription) {
 		for _, char := range sub.Chars {
 			char.unregisterSubscriber(sub.updates)
 		}
-		// Drain any remaining values in our channel
-		drainChannel(sub.updates)
+
+		// Drain any remaining values (with count for diagnostics)
+		drained := drainChannel(sub.updates)
+		sub.Diag.AddDrained(drained)
+		sub.Diag.MarkCleanedUp()
 	}()
 
 	// Recover from panics in subscription callback to prevent crash
 	defer func() {
 		if r := recover(); r != nil {
+			sub.Diag.MarkPanicRecovered()
 			if c.logger != nil {
 				c.logger.WithFields(map[string]interface{}{
 					"panic":          r,
 					"connection_ptr": fmt.Sprintf("%p", c),
-				}).Error("Subscription callback panicked")
+				}).Error("Subscription callback panicked: sub=", sub.Name)
 			}
 		}
 	}()
 
 	if c.logger != nil {
-		c.logger.WithField("sub", sub.Name).Debug("Subscription goroutine started")
+		c.logger.Debug("Subscription goroutine started: sub=", sub.Name)
 	}
 	defer func() {
 		if c.logger != nil {
-			c.logger.WithField("sub", sub.Name).Debug("Subscription goroutine exiting")
+			c.logger.Debug("Subscription goroutine exiting: sub=", sub.Name)
 		}
 	}()
 
-	// CoreBluetooth delivers cached characteristic values asynchronously over ~100-200ms
-	// after SetNotify(true) returns. Wait for the delivery to complete, then drain once.
-	// DrainDuration can be set to 0 in tests to skip this delay.
-	if c.DrainDuration > 0 {
-		time.Sleep(c.DrainDuration)
-		drainChannel(sub.updates)
+	// Drain stale cached values that may arrive asynchronously after subscription starts.
+	// The drain exits early when no more values arrive (stale flow stopped), or after
+	// DrainDuration elapses—whichever comes first. Set DrainDuration to 0 to disable.
+	if sub.DrainDuration > 0 {
+		const drainQuietPeriod = 50 * time.Millisecond
+		deadline := time.Now().Add(sub.DrainDuration)
+		totalDrained := 0
+
+		for time.Now().Before(deadline) {
+			// Drain any immediately available values
+			drained := drainChannel(sub.updates)
+			totalDrained += drained
+
+			// Wait for more values or quiet period timeout
+			remaining := time.Until(deadline)
+			if remaining <= 0 {
+				break
+			}
+			waitTime := min(drainQuietPeriod, remaining)
+
+			select {
+			case val := <-sub.updates:
+				// More values arriving, continue draining
+				val.release()
+				totalDrained++
+			case <-time.After(waitTime):
+				// No values arrived within quiet period—stale flow stopped, exit early
+				sub.Diag.AddDrained(totalDrained)
+				goto drainComplete
+			case <-sub.ctx.Done():
+				sub.Diag.AddDrained(totalDrained)
+				return
+			}
+		}
+		sub.Diag.AddDrained(totalDrained)
 	}
+drainComplete:
 
 	// StreamEveryUpdate: process each value immediately as it arrives
 	if sub.Mode == device.StreamEveryUpdate {
@@ -385,30 +463,34 @@ func (c *BLEConnection) runSubscription(sub *Subscription) {
 			// would starve ctx.Done() checks, preventing responsive shutdown.
 			select {
 			case <-sub.ctx.Done():
+				sub.Diag.MarkImplicitCancel()
 				return
 			case val := <-sub.updates:
 				if val.Char == nil {
 					val.release()
 					continue
 				}
+				sub.Diag.MarkFirstValue() // only sets once
 				if c.logger != nil {
 					c.logger.WithFields(logrus.Fields{
 						"char": val.Char.UUID(),
 						"len":  len(val.Data),
 						"time": time.Now().Format("15:04:05.000"),
-					}).Debug("[SUB] dequeue from channel")
+					}).Debugf("[SUB] dequeue from channel: sub=%s, char=%s, len=%d", sub.Name, val.Char.UUID(), len(val.Data))
 				}
 				record := newRecord(device.StreamEveryUpdate)
 				record.Values[val.Char.UUID()] = val.Data
+				record.Seq = val.Seq
 				record.TsUs = val.TsUs
-				if val.Flags != 0 {
-					record.Flags |= val.Flags
-				}
+				record.Flags |= val.Flags
+
 				// IMPORTANT: record.Values contain references to pooled BLEValue.Data slices.
 				// After this callback returns, the BLEValue is released back to the pool (see val.release() and
 				// its Data slice will be reused for subsequent notifications. Callbacks that
 				// store records for later processing MUST deep-copy record.Values entries.
 				sub.Callback(record)
+				sub.Diag.IncrementCallback()
+				sub.Diag.IncrementProcessed()
 				if c.logger != nil {
 					c.logger.Debug("[subscription] callback returned")
 				}
@@ -425,7 +507,8 @@ func (c *BLEConnection) runSubscription(sub *Subscription) {
 	defer ticker.Stop()
 
 	// Buffers for batched/aggregated modes
-	batchValues := make(map[string][][]byte)   // StreamBatched: all values per char
+	batchValues := make(map[string][][]byte) // StreamBatched: all values per char
+	batchMeta := make(map[string][]*device.RecordMeta)
 	latestValues := make(map[string]*BLEValue) // StreamAggregated: latest value per char
 
 	for {
@@ -433,6 +516,7 @@ func (c *BLEConnection) runSubscription(sub *Subscription) {
 		// would starve ctx.Done() checks, preventing responsive shutdown.
 		select {
 		case <-sub.ctx.Done():
+			sub.Diag.MarkImplicitCancel()
 			// Release any held values in aggregated mode
 			for _, v := range latestValues {
 				v.release()
@@ -444,7 +528,16 @@ func (c *BLEConnection) runSubscription(sub *Subscription) {
 				val.release()
 				continue
 			}
+			sub.Diag.MarkFirstValue() // only sets once
 			charUUID := val.Char.UUID()
+
+			// Subscription mode either: StreamBatched or StreamAggregated
+			batchMeta[charUUID] = append(batchMeta[charUUID], &device.RecordMeta{
+				Seq:   val.Seq,
+				TsUs:  val.TsUs,
+				Flags: val.Flags,
+			})
+			sub.Diag.IncrementProcessed()
 
 			if sub.Mode == device.StreamBatched {
 				// Accumulate all values for each characteristic
@@ -462,19 +555,33 @@ func (c *BLEConnection) runSubscription(sub *Subscription) {
 			}
 
 		case <-ticker.C:
+			// Subscription mode either: StreamBatched or StreamAggregated
+			record := newRecord(sub.Mode)
+			record.Meta = batchMeta
+
+			// Set max(TsUs, Seq) across all batches
+			for _, batches := range batchMeta {
+				for _, rm := range batches {
+					record.TsUs = max(rm.TsUs, record.TsUs)
+					record.Seq = max(rm.Seq, record.Seq)
+				}
+			}
+			record.TsUs = time.Now().UnixMicro()
+
 			if sub.Mode == device.StreamBatched {
 				if len(batchValues) > 0 {
-					record := newRecord(device.StreamBatched)
 					record.BatchValues = batchValues
-					record.TsUs = time.Now().UnixMicro()
+
 					sub.Callback(record)
+					sub.Diag.IncrementCallback()
+
 					// Reset for next batch
+					// TODO: SLAB ALLOCATOR FOR SLICES
 					batchValues = make(map[string][][]byte)
 				}
 			} else {
 				// StreamAggregated
 				if len(latestValues) > 0 {
-					record := newRecord(device.StreamAggregated)
 					for charUUID, val := range latestValues {
 						record.Values[charUUID] = val.Data
 						if val.Flags != 0 {
@@ -483,13 +590,20 @@ func (c *BLEConnection) runSubscription(sub *Subscription) {
 						if val.TsUs > record.TsUs {
 							record.TsUs = val.TsUs
 						}
-						val.release()
 					}
 					sub.Callback(record)
+					sub.Diag.IncrementCallback()
+					// Release pooled values AFTER callback completes to avoid data race
+					for _, val := range latestValues {
+						val.release()
+					}
 					// Reset for next interval
 					latestValues = make(map[string]*BLEValue)
 				}
 			}
+
+			// Reset Meta for next interval
+			batchMeta = make(map[string][]*device.RecordMeta)
 		}
 	}
 }

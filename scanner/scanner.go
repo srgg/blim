@@ -211,7 +211,7 @@ func (s *Scanner) shouldIncludeDevice(adv device.Advertisement, opts *ScanOption
 	return true
 }
 
-// GetDevices returns a snapshot of discovered devices
+// makeDeviceList returns a snapshot of discovered devices
 func (s *Scanner) makeDeviceList() []DeviceEntry {
 	devs := make([]DeviceEntry, 0, s.devices.Len())
 

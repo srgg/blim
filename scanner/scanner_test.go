@@ -1,3 +1,5 @@
+//go:build test
+
 package scanner_test
 
 import (
@@ -15,7 +17,7 @@ import (
 )
 
 type ScannerTestSuite struct {
-	testutils.MockBLEPeripheralSuite
+	testutils.PeripheralDeviceSuite
 
 	adv1, adv2, adv3 device.Advertisement
 	dev1, dev2, dev3 device.DeviceInfo
@@ -58,11 +60,11 @@ func (suite *ScannerTestSuite) SetupTest() {
 	suite.adv3 = advBuilder3.Build()
 	suite.dev3 = advBuilder3.BuildDevice(suite.Logger)
 
-	suite.WithAdvertisements().
-		WithAdvertisements(suite.adv1, suite.adv2, suite.adv3).
-		Build()
-
-	suite.MockBLEPeripheralSuite.SetupTest()
+	suite.GivenAdvertisements(func(a *testutils.AdvertisementArrayBuilder[[]device.Advertisement]) {
+		a.
+			WithAdvertisements(suite.adv1, suite.adv2, suite.adv3)
+	})
+	suite.PeripheralDeviceSuite.SetupTest()
 }
 
 func (suite *ScannerTestSuite) TestNewScanner() {
@@ -214,10 +216,8 @@ func (suite *ScannerTestSuite) TestScannerFiltering() {
 
 	for _, tt := range tests {
 		suite.Run(tt.name, func() {
-			helper := testutils.NewTestHelper(suite.T())
-
 			// Create scanner
-			s, err := scanner.NewScanner(helper.Logger)
+			s, err := scanner.NewScanner(suite.Logger)
 			require.NoError(suite.T(), err)
 
 			// Add short duration to test cases that don't have one

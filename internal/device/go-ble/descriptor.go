@@ -94,7 +94,7 @@ func newDescriptor(d *ble.Descriptor, conn *BLEConnection, client ble.Client, ti
 	case <-time.After(timeout):
 		// Timeout - set parsedValue to DescriptorError
 		bleDesc.parsedValue = &device.DescriptorError{
-			Reason: "timeout",
+			Reason: "read_timeout",
 			Err:    nil,
 		}
 		if logger != nil {

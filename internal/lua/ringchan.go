@@ -78,7 +78,7 @@ func (rc *RingChannel[T]) TrySend(v T) bool {
 // ForceSend always succeeds immediately, discarding the oldest if needed.
 // It never blocks.
 func (rc *RingChannel[T]) ForceSend(v T) bool {
-	droped := false
+	dropped := false
 
 	select {
 	case rc.ch <- v:
@@ -87,14 +87,14 @@ func (rc *RingChannel[T]) ForceSend(v T) bool {
 		select {
 		case <-rc.ch: // drop oldest
 			rc.metrics.addOverwritten(1)
-			droped = true
+			dropped = true
 		default:
 		}
 		rc.ch <- v
 		rc.metrics.addWritten(1)
 	}
 
-	return droped
+	return dropped
 }
 
 // Receive blocks until a value is available or the channel is closed.

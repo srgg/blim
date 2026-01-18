@@ -32,6 +32,13 @@
 **Working with tests:**
 ```
 .serena/memories/mandatory-standards-testing.md
+
+Always run tests with timeout, use `-tags test` and setyo `CGO_ENABLED=1`:
+```shell
+ CGO_ENABLED=1 go test -tags "test luajit" -v ./cmd/... -timeout 30s 2>&1 | grep -E "^(=== RUN|--- FAIL|--- PASS|FAIL|PASS|ok)" | grep -E "(FAIL|^ok)"
+  CGO_ENABLED=1 go test -tags "test luajit" -v ./cmd/... -timeout 30s 2>&1 | grep -B5 -E "(Error:|FAIL\t)"
+
+Error: unknown flag: --verbose
 ```
 
 ## Session Workflow

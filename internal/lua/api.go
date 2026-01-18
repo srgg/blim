@@ -7,6 +7,7 @@ import (
 	"io"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -33,12 +34,36 @@ type BridgeInfo interface {
 	SetPTYReadCallback(cb func([]byte)) // Set callback for PTY data arrival (nil to unregister)
 }
 
+// LuaAPIInterface defines the interface for LuaAPI used at factory boundaries.
+// This enables test wrappers to intercept SetBridge calls for bridge capture.
+type LuaAPIInterface interface {
+	// SetBridge Bridge management
+	SetBridge(BridgeInfo)
+
+	// GetDevice Device access
+	GetDevice() device.Device
+
+	// OutputChannel Output channel for Lua print/error output
+	OutputChannel() <-chan LuaOutputRecord
+
+	// ExecuteScript Script execution
+	ExecuteScript(ctx context.Context, script string) error
+
+	// SetCharacteristicReadTimeout Configuration setters (for ExecuteDeviceScriptWithOutput)
+	SetCharacteristicReadTimeout(d time.Duration)
+	SetCharacteristicWriteTimeout(d time.Duration)
+	SetPackagePaths(scriptPath string, libPaths []string) error
+
+	Close()
+}
+
 // LuaSubscriptionTable Lua subscription configuration
 type LuaSubscriptionTable struct {
-	Services    []device.SubscribeOptions `json:"services"`
-	Mode        string                    `json:"mode"`
-	MaxRate     int                       `json:"max_rate"`
-	CallbackRef int                       `json:"-"` // Lua function reference
+	Services      []device.SubscribeOptions `json:"services"`
+	Mode          string                    `json:"mode"`
+	MaxRate       int                       `json:"max_rate"`
+	DrainDuration int                       `json:"drain_duration"` // milliseconds; 0 = disable drain
+	CallbackRef   int                       `json:"-"`              // Lua function reference; lua.LUA_NOREF (-2) means none
 }
 
 // LuaAPI represents the new BLE API that supports Lua subscriptions
@@ -50,6 +75,9 @@ type LuaAPI struct {
 	bridge                     BridgeInfo    // Optional bridge information
 	characteristicReadTimeout  time.Duration // Default timeout for characteristic read operations
 	characteristicWriteTimeout time.Duration // Default timeout for characteristic write operations
+	closeOnce                  sync.Once     // Ensures Close() is idempotent
+	ptyCallbackRef             int           // Tracks PTY callback ref for cleanup; lua.LUA_NOREF if none
+	subscriptionCallbackRefs   []int         // Tracks subscription callback refs for cleanup
 }
 
 // NewBLEAPI2 creates a new BLE API instance with subscription support
@@ -60,6 +88,7 @@ func NewBLEAPI2(device device.Device, logger *logrus.Logger) *LuaAPI {
 		LuaEngine:                  NewLuaEngine(logger),
 		characteristicReadTimeout:  DefaultCharacteristicReadTimeout,
 		characteristicWriteTimeout: DefaultCharacteristicWriteTimeout,
+		ptyCallbackRef:             lua.LUA_NOREF, // No callback registered initially
 	}
 
 	r.Reset()
@@ -79,6 +108,31 @@ func (api *LuaAPI) SetBridge(bridge BridgeInfo) {
 		"api_ptr":    fmt.Sprintf("%p", api),
 	}).Debug("SetBridge called")
 	api.bridge = bridge
+}
+
+// SetCharacteristicReadTimeout sets the timeout for characteristic read operations.
+func (api *LuaAPI) SetCharacteristicReadTimeout(d time.Duration) {
+	api.characteristicReadTimeout = d
+}
+
+// SetCharacteristicWriteTimeout sets the timeout for characteristic write operations.
+func (api *LuaAPI) SetCharacteristicWriteTimeout(d time.Duration) {
+	api.characteristicWriteTimeout = d
+}
+
+// SetPackagePaths configures allowed paths for secure module loading.
+// Adds script directory and validated library paths to SecureModuleLoader.
+func (api *LuaAPI) SetPackagePaths(scriptPath string, libPaths []string) error {
+	return api.LuaEngine.SetPackagePaths(scriptPath, libPaths)
+}
+
+// releasePTYCallbackRef releases the PTY callback reference from Lua registry if one exists.
+// Must be called within DoWithState or when L is already available.
+func (api *LuaAPI) releasePTYCallbackRef(L *lua.State) {
+	if api.ptyCallbackRef != lua.LUA_NOREF {
+		L.Unref(lua.LUA_REGISTRYINDEX, api.ptyCallbackRef)
+		api.ptyCallbackRef = lua.LUA_NOREF
+	}
 }
 
 // registerBridgeInfo registers the blim.bridge table with runtime bridge checking
@@ -179,7 +233,7 @@ func (api *LuaAPI) registerBridgeInfo(L *lua.State) {
 			maxBytes = L.ToInteger(1)
 			if maxBytes <= 0 {
 				L.PushNil()
-				L.PushString("pty_read(max_bytes) expects a positive integer")
+				L.PushString("pty_read(max_bytes) max_bytes must be greater than zero")
 				return 2
 			}
 		}
@@ -223,6 +277,7 @@ func (api *LuaAPI) registerBridgeInfo(L *lua.State) {
 		// Check if nil was passed (unregister callback)
 		if L.IsNil(1) {
 			api.logger.Debug("[pty_on_data] Unregistering PTY callback")
+			api.releasePTYCallbackRef(L)
 			api.bridge.SetPTYReadCallback(nil)
 			return 0
 		}
@@ -233,8 +288,12 @@ func (api *LuaAPI) registerBridgeInfo(L *lua.State) {
 			return 0
 		}
 
+		// Release previous callback ref before creating new one to avoid registry leak
+		api.releasePTYCallbackRef(L)
+
 		// Store reference to the callback function in the Lua registry
 		callbackRef := L.Ref(lua.LUA_REGISTRYINDEX)
+		api.ptyCallbackRef = callbackRef
 
 		api.logger.WithField("callback_ref", callbackRef).Debug("[pty_on_data] Registering PTY callback")
 
@@ -552,7 +611,9 @@ func (api *LuaAPI) registerDeviceInfo(L *lua.State) {
 
 // parseSubscriptionTable parses the Lua table into a LuaSubscriptionTable
 func (api *LuaAPI) parseSubscriptionTable(L *lua.State, tableIndex int) (*LuaSubscriptionTable, error) {
-	config := &LuaSubscriptionTable{}
+	config := &LuaSubscriptionTable{
+		CallbackRef: lua.LUA_NOREF, // Explicit "no callback" marker; 0 is a valid ref
+	}
 
 	// Convert relative index to absolute index
 	if tableIndex < 0 {
@@ -589,6 +650,15 @@ func (api *LuaAPI) parseSubscriptionTable(L *lua.State, tableIndex int) (*LuaSub
 		config.MaxRate = L.ToInteger(-1)
 	} else {
 		config.MaxRate = 0 // Default
+	}
+	L.Pop(1)
+
+	// Parse DrainDuration (milliseconds)
+	L.PushString("DrainDuration")
+	if L.IsNumber(-1) {
+		config.DrainDuration = L.ToInteger(-1)
+	} else {
+		config.DrainDuration = 0 // Default: drain disabled
 	}
 	L.Pop(1)
 
@@ -697,20 +767,23 @@ func (api *LuaAPI) executeSubscription(config *LuaSubscriptionTable) error {
 		opts = append(opts, opt)
 	}
 
-	// Parse mode and max rate
+	// Parse mode, max rate, and drain duration
 	pattern := parseStreamPattern(config.Mode)
 	maxRate := time.Duration(config.MaxRate) * time.Millisecond
+	drainDuration := time.Duration(config.DrainDuration) * time.Millisecond
 
 	// Create a callback that calls the Lua function (nil if no callback provided)
 	var callback func(*device.Record)
-	if config.CallbackRef != 0 {
+	if config.CallbackRef != lua.LUA_NOREF {
+		// Track ref for cleanup in Close()
+		api.subscriptionCallbackRefs = append(api.subscriptionCallbackRefs, config.CallbackRef)
 		callback = func(record *device.Record) {
 			api.callLuaCallback(config.CallbackRef, record)
 		}
 	}
 
 	// Call Subscribe on the connection
-	_, err := api.device.GetConnection().Subscribe(opts, pattern, maxRate, callback)
+	_, err := api.device.GetConnection().Subscribe(opts, pattern, maxRate, drainDuration, callback)
 	return err
 }
 
@@ -806,7 +879,7 @@ func (api *LuaAPI) callLuaCallback(callbackRef int, record *device.Record) error
 		if r := recover(); r != nil {
 			// Log ALL panics (LuaError or otherwise) and recover gracefully
 			stack := string(debug.Stack())
-			api.logger.Errorf("Lua subsribe callback panic (recovered): %v\nStack:\n%s", r, stack)
+			api.logger.Errorf("Lua subscribe callback panic (recovered): %v\nStack:\n%s", r, stack)
 
 			// Send error to stderr for user visibility
 			api.LuaEngine.outputChan.ForceSend(LuaOutputRecord{
@@ -1157,12 +1230,10 @@ func (api *LuaAPI) registerSleepFunction(L *lua.State) {
 
 		// Release mutex to allow callbacks to execute during sleep
 		api.LuaEngine.stateMutex.Unlock()
+		defer api.LuaEngine.stateMutex.Lock()
 
 		// Sleep for the specified duration
 		time.Sleep(time.Duration(ms) * time.Millisecond)
-
-		// Reacquire mutex before returning to Lua
-		api.LuaEngine.stateMutex.Lock()
 
 		return 0
 	})
@@ -1341,13 +1412,33 @@ func (api *LuaAPI) pushManufacturerParsedData(L *lua.State, parsedData interface
 	}
 }
 
-// Close cleans up the API resources
+// Close cleans up the API resources. Idempotent and thread-safe.
 func (api *LuaAPI) Close() {
-	if api.logger != nil {
-		api.logger.WithField("lua_api_ptr", fmt.Sprintf("%p", api)).Debug("Closing lua api...")
-	}
-	api.LuaEngine.Close()
-	if api.logger != nil {
-		api.logger.WithField("lua_api_ptr", fmt.Sprintf("%p", api)).Debug("Lua api closed")
-	}
+	api.closeOnce.Do(func() {
+		if api.logger != nil {
+			api.logger.WithField("lua_api_ptr", fmt.Sprintf("%p", api)).Debug("Closing lua api...")
+		}
+
+		// Clean up Lua registry references before closing LuaEngine
+		api.LuaEngine.DoWithState(func(L *lua.State) interface{} {
+			// Release PTY callback ref
+			api.releasePTYCallbackRef(L)
+
+			// Release subscription callback refs
+			for _, ref := range api.subscriptionCallbackRefs {
+				if ref != lua.LUA_NOREF {
+					L.Unref(lua.LUA_REGISTRYINDEX, ref)
+				}
+			}
+			api.subscriptionCallbackRefs = nil
+			return nil
+		})
+
+		api.LuaEngine.Close()
+		api.device.Disconnect()
+
+		if api.logger != nil {
+			api.logger.WithField("lua_api_ptr", fmt.Sprintf("%p", api)).Debug("Lua api closed")
+		}
+	})
 }

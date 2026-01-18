@@ -288,7 +288,7 @@ func (b *AdvertisementBuilder[T]) Build() T {
 }
 
 // BuildDevice creates a device.Device by building a fresh MockAdvertisement internally.
-// Convenience method for creating Device instances in tests without needing to call Build() separately.
+// Convenience method for creating Device instances in device_test without needing to call Build() separately.
 func (b *AdvertisementBuilder[T]) BuildDevice(logger *logrus.Logger) device.Device {
 	// Build returns T, but we know for BuildDevice it must be *MockAdvertisement
 	var result interface{} = b.Build()
@@ -341,7 +341,8 @@ func (b *AdvertisementBuilder[T]) BuildDevice(logger *logrus.Logger) device.Devi
 type AdvertisementArrayBuilder[T any] struct {
 	advertisements []device.Advertisement
 	parent         T
-	buildFunc      func(T, []device.Advertisement) T
+	buildFunc      func(T, int, []device.Advertisement) T
+	scanDelayMs    int // Delay in milliseconds before emitting each advertisement
 }
 
 // NewAdvertisementArrayBuilder creates a new array builder with the specified generic type.
@@ -349,6 +350,22 @@ func NewAdvertisementArrayBuilder[T any]() *AdvertisementArrayBuilder[T] {
 	return &AdvertisementArrayBuilder[T]{
 		advertisements: make([]device.Advertisement, 0),
 	}
+}
+
+// WithScanDelay sets the delay in milliseconds before emitting advertisements during scan.
+// This simulates real-world BLE scanning where advertisements arrive over time.
+// Useful for testing timeout behavior.
+func (sb *AdvertisementArrayBuilder[T]) WithScanDelay(delayMs int) *AdvertisementArrayBuilder[T] {
+	sb.scanDelayMs = delayMs
+	return sb
+}
+
+// WithBlockingScan configures the scan to block indefinitely after emitting advertisements.
+// This simulates real-world BLE scan behavior where the scan continues until the context is canceled.
+// Useful for testing interrupt handling (SIGINT) and watch mode behavior.
+func (sb *AdvertisementArrayBuilder[T]) WithBlockingScan() *AdvertisementArrayBuilder[T] {
+	sb.scanDelayMs = -1 // Sentinel value for blocking mode
+	return sb
 }
 
 // WithAdvertisements adds pre-existing Advertisements to the array and returns the array builder for chaining.
@@ -386,7 +403,7 @@ func (ab *AdvertisementArrayBuilder[T]) WithNewAdvertisement() *AdvertisementArr
 // Build returns the parent if it exists and has a buildFunc, otherwise returns the array
 func (ab *AdvertisementArrayBuilder[T]) Build() T {
 	if ab.buildFunc != nil {
-		return ab.buildFunc(ab.parent, ab.advertisements)
+		return ab.buildFunc(ab.parent, ab.scanDelayMs, ab.advertisements)
 	}
 	// If no buildFunc, cast advertisements to T (this works for []*mocks.MockAdvertisement)
 	var result interface{} = ab.advertisements

@@ -23,7 +23,7 @@ type WriteTestSuite struct {
 	}
 }
 
-// SetupSuite runs once before all tests in the suite
+// SetupSuite runs once before all device_test in the suite
 func (suite *WriteTestSuite) SetupSuite() {
 	suite.CommandTestSuite.SetupSuite()
 
@@ -37,7 +37,7 @@ func (suite *WriteTestSuite) SetupSuite() {
 	suite.originalFlags.writeTimeout = writeTimeout
 }
 
-// TearDownSuite runs once after all tests in the suite
+// TearDownSuite runs once after all device_test in the suite
 func (suite *WriteTestSuite) TearDownSuite() {
 	// Restore original flag values
 	writeServiceUUID = suite.originalFlags.writeServiceUUID
@@ -47,8 +47,6 @@ func (suite *WriteTestSuite) TearDownSuite() {
 	writeNoResponse = suite.originalFlags.writeNoResponse
 	writeChunkSize = suite.originalFlags.writeChunkSize
 	writeTimeout = suite.originalFlags.writeTimeout
-
-	suite.CommandTestSuite.TearDownSuite()
 }
 
 // SetupTest runs before each test in the suite
@@ -61,6 +59,8 @@ func (suite *WriteTestSuite) SetupTest() {
 	writeNoResponse = false
 	writeChunkSize = 0
 	writeTimeout = 5 * time.Second
+
+	suite.CommandTestSuite.SetupTest()
 }
 
 func (suite *WriteTestSuite) TestParseWriteData_HexFormats() {
@@ -293,16 +293,6 @@ func (suite *WriteTestSuite) TestWriteCmd_ArgsValidation() {
 			}
 		})
 	}
-}
-
-func (suite *WriteTestSuite) TestWriteCmd_FlagConflicts() {
-	// GOAL: Verify mutually exclusive flags are detected
-	//
-	// TEST SCENARIO: Check flag conflict validation → hex+raw rejected → with-response+no-response rejected
-
-	// Note: These conflicts are checked in runWrite, not in Args validator
-	// This test documents the expected validation behavior
-	suite.T().Skip("Flag conflicts validated in runWrite execution - tested in integration tests")
 }
 
 // TestWriteCommandSuite runs the test suite

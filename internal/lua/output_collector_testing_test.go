@@ -3,6 +3,7 @@ package lua
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -14,7 +15,7 @@ import (
 	"github.com/stretchr/testify/suite"
 )
 
-// LuaOutputCollectorTestSuite provides comprehensive tests for LuaOutputCollector
+// LuaOutputCollectorTestSuite provides comprehensive device_test for LuaOutputCollector
 type LuaOutputCollectorTestSuite struct {
 	suite.Suite
 }
@@ -31,7 +32,7 @@ func (suite *LuaOutputCollectorTestSuite) waitForState(collector *LuaOutputColle
 	return false
 }
 
-// TestNewLuaOutputCollector tests the constructor with various input test-scenarios
+// TestNewLuaOutputCollector device_test the constructor with various input test-scenarios
 func (suite *LuaOutputCollectorTestSuite) TestNewLuaOutputCollector() {
 	// GOAL: Verify LuaOutputCollector constructor validates parameters and initializes correctly
 	//
@@ -123,7 +124,7 @@ func (suite *LuaOutputCollectorTestSuite) TestNewLuaOutputCollector() {
 	})
 }
 
-// TestStartStop tests the basic start/stop lifecycle
+// TestStartStop device_test the basic start/stop lifecycle
 func (suite *LuaOutputCollectorTestSuite) TestStartStop() {
 	// GOAL: Verify collector lifecycle state transitions work correctly for start/stop operations
 	//
@@ -216,7 +217,7 @@ func (suite *LuaOutputCollectorTestSuite) TestStartStop() {
 	// The Stop() method should always complete normally.
 }
 
-// TestDataProcessing tests record processing and metrics
+// TestDataProcessing device_test record processing and metrics
 func (suite *LuaOutputCollectorTestSuite) TestDataProcessing() {
 	// GOAL: Verify collector processes LuaOutputRecord data and updates metrics correctly
 	//
@@ -324,7 +325,7 @@ func (suite *LuaOutputCollectorTestSuite) TestDataProcessing() {
 	})
 }
 
-// TestMetrics tests metrics collection and atomic operations
+// TestMetrics device_test metrics collection and atomic operations
 func (suite *LuaOutputCollectorTestSuite) TestMetrics() {
 	// GOAL: Verify metrics tracking uses atomic operations and provides accurate counters
 	//
@@ -399,7 +400,7 @@ func (suite *LuaOutputCollectorTestSuite) TestMetrics() {
 	})
 }
 
-// TestConsumerFunctions tests the consumer pattern and records consumption
+// TestConsumerFunctions device_test the consumer pattern and records consumption
 func (suite *LuaOutputCollectorTestSuite) TestConsumerFunctions() {
 	// GOAL: Verify ConsumerFunc pattern processes buffered records and handles early termination
 	//
@@ -571,7 +572,7 @@ func (suite *LuaOutputCollectorTestSuite) TestConsumerFunctions() {
 	})
 }
 
-// TestConcurrency tests concurrent access and race conditions
+// TestConcurrency device_test concurrent access and race conditions
 func (suite *LuaOutputCollectorTestSuite) TestConcurrency() {
 	// GOAL: Verify thread-safe operations under concurrent access without data races
 	//
@@ -705,7 +706,7 @@ func (suite *LuaOutputCollectorTestSuite) TestConcurrency() {
 	})
 }
 
-// TestErrorHandling tests error test-scenarios and recovery
+// TestErrorHandling device_test error test-scenarios and recovery
 func (suite *LuaOutputCollectorTestSuite) TestErrorHandling() {
 	// GOAL: Verify custom error handlers are called and default behavior panics on errors
 	//
@@ -769,7 +770,7 @@ func (suite *LuaOutputCollectorTestSuite) TestErrorHandling() {
 	})
 }
 
-// TestBufferBehavior tests ring buffer behavior and overflow
+// TestBufferBehavior device_test ring buffer behavior and overflow
 func (suite *LuaOutputCollectorTestSuite) TestBufferBehavior() {
 	// GOAL: Verify ring buffer handles capacity limits and overflow with overlapped writes
 	//
@@ -833,7 +834,7 @@ func (suite *LuaOutputCollectorTestSuite) TestBufferBehavior() {
 	})
 }
 
-// TestIsZeroValue tests the helper function
+// TestIsZeroValue device_test the helper function
 func (suite *LuaOutputCollectorTestSuite) TestIsZeroValue() {
 	// GOAL: Verify isZeroValue helper function correctly identifies zero values for all types
 	//
@@ -869,7 +870,7 @@ func (suite *LuaOutputCollectorTestSuite) TestIsZeroValue() {
 	})
 }
 
-// TestRaceConditions runs tests with race detector
+// TestRaceConditions runs device_test with race detector
 func (suite *LuaOutputCollectorTestSuite) TestRaceConditions() {
 	// GOAL: Verify no data races occur during concurrent start/stop and metrics operations
 	//
@@ -935,7 +936,7 @@ func (suite *LuaOutputCollectorTestSuite) TestRaceConditions() {
 	})
 }
 
-// TestLuaOutputCollectorEdgeCases tests specific edge cases and stress test-scenarios
+// TestLuaOutputCollectorEdgeCases device_test specific edge cases and stress test-scenarios
 func TestLuaOutputCollectorEdgeCases(t *testing.T) {
 	// GOAL: Verify collector handles edge cases like boundary conditions and high throughput
 	//
@@ -1052,6 +1053,202 @@ func TestLuaOutputCollectorEdgeCases(t *testing.T) {
 				}
 			}
 		}
+	})
+}
+
+// TestWriterAdapters tests the io.WriteCloser adapter functionality for LuaOutputCollector
+func (suite *LuaOutputCollectorTestSuite) TestWriterAdapters() {
+	// GOAL: Verify StdoutWriter/StderrWriter provide io.WriteCloser interface to collector
+	//
+	// TEST SCENARIO: Test writer creation, writes, lifecycle, errors, and concurrency
+
+	suite.Run("WriterCreatesRecords", func() {
+		// GOAL: Verify writer adds records to buffer with correct content
+		//
+		// TEST SCENARIO: Write to writer → consume records → verify content matches
+		ch := make(chan LuaOutputRecord, 10)
+		defer close(ch)
+
+		collector, err := NewLuaOutputCollector(ch, 100, nil)
+		suite.Require().NoError(err)
+
+		// Get writer (collector doesn't need to be started - writer uses AddRecord directly)
+		writer := collector.StdoutWriter()
+		defer writer.Close()
+
+		// Write test content
+		testContent := "hello world"
+		n, err := writer.Write([]byte(testContent))
+		suite.NoError(err)
+		suite.Equal(len(testContent), n)
+
+		// Consume and verify content
+		result, err := collector.ConsumePlainText()
+		suite.NoError(err)
+		suite.Equal(testContent, result)
+	})
+
+	suite.Run("WriterLifecycle", func() {
+		// GOAL: Verify writer acquisition stops collector goroutine and release restarts it
+		//
+		// TEST SCENARIO: Start collector → get writer (verify stopped) → close writer → verify restarted
+		ch := make(chan LuaOutputRecord, 10)
+		defer close(ch)
+
+		collector, err := NewLuaOutputCollector(ch, 100, nil)
+		suite.Require().NoError(err)
+
+		// Start collector
+		err = collector.Start()
+		suite.Require().NoError(err)
+		suite.True(suite.waitForState(collector, CollectorStateRunning, 100*time.Millisecond))
+
+		// Get writer - should stop collector goroutine
+		writer := collector.StdoutWriter()
+		suite.True(suite.waitForState(collector, CollectorStateNotRunning, 100*time.Millisecond))
+
+		// Close writer - should restart collector goroutine
+		err = writer.Close()
+		suite.NoError(err)
+		suite.True(suite.waitForState(collector, CollectorStateRunning, 100*time.Millisecond))
+
+		// Cleanup
+		err = collector.Stop()
+		suite.NoError(err)
+	})
+
+	suite.Run("WriteToClosedWriter", func() {
+		// GOAL: Verify writing to closed writer returns fs.ErrClosed
+		//
+		// TEST SCENARIO: Get writer → close → write → verify errors.Is(err, fs.ErrClosed)
+		ch := make(chan LuaOutputRecord, 10)
+		defer close(ch)
+
+		collector, err := NewLuaOutputCollector(ch, 100, nil)
+		suite.Require().NoError(err)
+
+		// Get and close writer
+		writer := collector.StdoutWriter()
+		err = writer.Close()
+		suite.NoError(err)
+
+		// Write to closed writer
+		n, err := writer.Write([]byte("test"))
+		suite.Equal(0, n)
+		suite.Error(err)
+		suite.True(errors.Is(err, fs.ErrClosed), "expected fs.ErrClosed, got: %v", err)
+	})
+
+	suite.Run("DoubleCloseIsSafe", func() {
+		// GOAL: Verify closing writer twice is safe and idempotent
+		//
+		// TEST SCENARIO: Get writer → close → close again → no panic and no error
+		ch := make(chan LuaOutputRecord, 10)
+		defer close(ch)
+
+		collector, err := NewLuaOutputCollector(ch, 100, nil)
+		suite.Require().NoError(err)
+
+		writer := collector.StdoutWriter()
+
+		// First close
+		err = writer.Close()
+		suite.NoError(err)
+
+		// Second close - should be safe
+		suite.NotPanics(func() {
+			err = writer.Close()
+			suite.NoError(err)
+		})
+	})
+
+	suite.Run("ConcurrentWriterWrites", func() {
+		// GOAL: Verify concurrent writes to multiple writers are thread-safe
+		//
+		// TEST SCENARIO: Multiple goroutines write to stdout/stderr writers → verify all records in buffer
+		ch := make(chan LuaOutputRecord, 10)
+		defer close(ch)
+
+		collector, err := NewLuaOutputCollector(ch, 1000, nil)
+		suite.Require().NoError(err)
+
+		stdoutWriter := collector.StdoutWriter()
+		stderrWriter := collector.StderrWriter()
+		defer stdoutWriter.Close()
+		defer stderrWriter.Close()
+
+		var wg sync.WaitGroup
+		var stdoutErrors, stderrErrors atomic.Int32
+		writesPerWriter := 100
+
+		// Concurrent stdout writes
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < writesPerWriter; i++ {
+				content := fmt.Sprintf("out%d\n", i)
+				n, err := stdoutWriter.Write([]byte(content))
+				if err != nil || n != len(content) {
+					stdoutErrors.Add(1)
+				}
+			}
+		}()
+
+		// Concurrent stderr writes
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < writesPerWriter; i++ {
+				content := fmt.Sprintf("err%d\n", i)
+				n, err := stderrWriter.Write([]byte(content))
+				if err != nil || n != len(content) {
+					stderrErrors.Add(1)
+				}
+			}
+		}()
+
+		wg.Wait()
+
+		// Verify no write errors occurred
+		suite.Equal(int32(0), stdoutErrors.Load(), "stdout write errors occurred")
+		suite.Equal(int32(0), stderrErrors.Load(), "stderr write errors occurred")
+
+		// Count records in buffer
+		var recordCount int
+		_, _ = ConsumeRecords(collector, func(rec *LuaOutputRecord) (int, error) {
+			if rec != nil {
+				recordCount++
+			}
+			return 0, nil
+		})
+
+		suite.Equal(writesPerWriter*2, recordCount)
+	})
+
+	suite.Run("AddRecordDirect", func() {
+		// GOAL: Verify AddRecord adds record directly to buffer without running collector
+		//
+		// TEST SCENARIO: Call AddRecord on stopped collector → consume → verify record content
+		ch := make(chan LuaOutputRecord, 10)
+		defer close(ch)
+
+		collector, err := NewLuaOutputCollector(ch, 100, nil)
+		suite.Require().NoError(err)
+
+		// Collector is NOT started - AddRecord should still work
+		suite.Equal(CollectorStateNotRunning, collector.GetState())
+
+		testRecord := &LuaOutputRecord{
+			Content:   "direct record",
+			Source:    "test",
+			Timestamp: time.Now(),
+		}
+		collector.AddRecord(testRecord)
+
+		// Consume and verify
+		result, err := collector.ConsumePlainText()
+		suite.NoError(err)
+		suite.Equal("direct record", result)
 	})
 }
 

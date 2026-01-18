@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"time"
@@ -139,6 +140,9 @@ func runRead(cmd *cobra.Command, args []string) error {
 	// Use background context
 	ctx := context.Background()
 
+	// Get output writer from command
+	out := cmd.OutOrStdout()
+
 	// Define the read operation
 	readOperation := func(dev device.Device) (any, error) {
 		// Stop progress indicator before printing output
@@ -156,7 +160,7 @@ func runRead(cmd *cobra.Command, args []string) error {
 			if err != nil {
 				return nil, err
 			}
-			return nil, performReadWithPrefix(char, desc, false)
+			return nil, performReadWithPrefix(out, char, desc, false)
 		}
 
 		// Characteristic path
@@ -169,14 +173,14 @@ func runRead(cmd *cobra.Command, args []string) error {
 		if len(chars) == 1 {
 			for _, char := range chars {
 				if readWatch != "" {
-					return nil, watchChar(ctx, dev, char, nil, watchInterval, logger)
+					return nil, watchChar(out, ctx, dev, char, nil, watchInterval, logger)
 				}
-				return nil, performReadWithPrefix(char, nil, false)
+				return nil, performReadWithPrefix(out, char, nil, false)
 			}
 		}
 
 		// Multi-characteristic
-		return nil, performMultiRead(chars)
+		return nil, performMultiRead(out, chars)
 	}
 
 	_, err = inspector.InspectDevice(ctx, address, opts, logger, progress.Callback(), readOperation)
@@ -185,7 +189,7 @@ func runRead(cmd *cobra.Command, args []string) error {
 
 // performMultiRead reads multiple characteristics and outputs with prefixes.
 // UUIDs are sorted for deterministic output order.
-func performMultiRead(chars map[string]device.Characteristic) error {
+func performMultiRead(w io.Writer, chars map[string]device.Characteristic) error {
 	// Sort UUIDs for deterministic output
 	charUUIDs := make([]string, 0, len(chars))
 	for uuid := range chars {
@@ -202,14 +206,14 @@ func performMultiRead(chars map[string]device.Characteristic) error {
 			continue
 		}
 
-		outputDataWithPrefix(uuid, data, true)
+		outputDataWithPrefix(w, uuid, data, true)
 	}
 
 	return nil
 }
 
 // performReadWithPrefix reads a single characteristic or descriptor with an optional UUID prefix.
-func performReadWithPrefix(char device.Characteristic, desc device.Descriptor, multiChar bool) error {
+func performReadWithPrefix(w io.Writer, char device.Characteristic, desc device.Descriptor, multiChar bool) error {
 	var data []byte
 	var err error
 
@@ -228,15 +232,15 @@ func performReadWithPrefix(char device.Characteristic, desc device.Descriptor, m
 	}
 
 	// Format and output data
-	return outputData(data)
+	return outputData(w, data)
 }
 
 // watchChar continuously reads a characteristic or descriptor at the specified interval
-func watchChar(ctx context.Context, dev device.Device, char device.Characteristic, desc device.Descriptor, interval time.Duration, logger *logrus.Logger) error {
+func watchChar(w io.Writer, ctx context.Context, dev device.Device, char device.Characteristic, desc device.Descriptor, interval time.Duration, logger *logrus.Logger) error {
 	fmt.Fprintf(os.Stderr, "Watching (reading every %v). Press Ctrl+C to stop...\n", interval)
 
 	// Perform immediate first read
-	if err := performSingleRead(char, desc, logger); err != nil {
+	if err := performSingleRead(w, char, desc, logger); err != nil {
 		return err
 	}
 
@@ -248,10 +252,10 @@ func watchChar(ctx context.Context, dev device.Device, char device.Characteristi
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
-			if err := performSingleRead(char, desc, logger); err != nil {
+			if err := performSingleRead(w, char, desc, logger); err != nil {
 				// Check if the connection was lost by checking for ErrNotConnected in the error chain
 				if errors.Is(err, device.ErrNotConnected) {
-					return ErrConnectionLost
+					return device.ErrConnectionLost
 				}
 
 				// Log other errors but continue watching
@@ -264,7 +268,7 @@ func watchChar(ctx context.Context, dev device.Device, char device.Characteristi
 }
 
 // performSingleRead executes a single read operation and outputs the data
-func performSingleRead(char device.Characteristic, desc device.Descriptor, logger *logrus.Logger) error {
+func performSingleRead(w io.Writer, char device.Characteristic, desc device.Descriptor, logger *logrus.Logger) error {
 	var data []byte
 	var err error
 
@@ -284,7 +288,7 @@ func performSingleRead(char device.Characteristic, desc device.Descriptor, logge
 	}
 
 	// Output data
-	if err := outputData(data); err != nil {
+	if err := outputData(w, data); err != nil {
 		logger.WithError(err).Error("failed to output data")
 		return err
 	}
@@ -293,34 +297,34 @@ func performSingleRead(char device.Characteristic, desc device.Descriptor, logge
 }
 
 // outputData formats and outputs data according to flags
-func outputData(data []byte) error {
+func outputData(w io.Writer, data []byte) error {
 	if readHex {
 		// Hex output
-		fmt.Println(hex.EncodeToString(data))
+		fmt.Fprintln(w, hex.EncodeToString(data))
 		return nil
 	}
 
-	// Default: Raw binary output to stdout
-	_, err := os.Stdout.Write(data)
+	// Default: Raw binary output to writer
+	_, err := w.Write(data)
 	return err
 }
 
 // outputDataWithPrefix outputs data with an optional UUID prefix for multi-char reads.
-func outputDataWithPrefix(uuid string, data []byte, multiChar bool) {
+func outputDataWithPrefix(w io.Writer, uuid string, data []byte, multiChar bool) {
 	var prefix string
 	if multiChar {
 		prefix = device.ShortenUUID(uuid) + ": "
 	}
 
 	if readHex {
-		fmt.Printf("%s%s\n", prefix, hex.EncodeToString(data))
+		fmt.Fprintf(w, "%s%s\n", prefix, hex.EncodeToString(data))
 		return
 	}
 
 	// Raw binary output
 	if prefix != "" {
-		fmt.Print(prefix)
+		fmt.Fprint(w, prefix)
 	}
-	_, _ = os.Stdout.Write(data)
-	fmt.Println()
+	_, _ = w.Write(data)
+	fmt.Fprintln(w)
 }

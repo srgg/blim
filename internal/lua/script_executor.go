@@ -9,7 +9,6 @@ import (
 
 	"github.com/sirupsen/logrus"
 	"github.com/srg/blim/internal/device"
-	"github.com/srg/blim/internal/groutine"
 )
 
 // ScriptOptions holds configuration for Lua script execution.
@@ -18,9 +17,9 @@ type ScriptOptions struct {
 	// Its directory is automatically added to package.path for require().
 	ScriptPath string
 
-	// AdditionalLuaPaths are extra directories to search for Lua modules.
-	// These are added to package.path before the default search paths.
-	AdditionalLuaPaths []string
+	// LibraryPaths are extra directories to search for Lua modules.
+	// These are validated and added to SecureModuleLoader's allowed paths.
+	LibraryPaths []string
 }
 
 // ExecuteDeviceScriptWithOutput executes a Lua script with the given device and arguments,
@@ -35,7 +34,6 @@ type ScriptOptions struct {
 //   - args: Map of arguments to pass to the script via the arg[] table
 //   - stdout: Writer for standard output (if nil, output is discarded)
 //   - stderr: Writer for error output (if nil, errors are discarded)
-//   - drainTimeout: How long to wait for output after script completes (e.g., 50ms)
 //   - characteristicReadTimeout: Timeout for characteristic read operations (0 = use default)
 //   - characteristicWriteTimeout: Timeout for characteristic write operations (0 = use default)
 //   - opts: Optional script options for module path configuration (can be nil)
@@ -44,12 +42,11 @@ type ScriptOptions struct {
 func ExecuteDeviceScriptWithOutput(
 	ctx context.Context,
 	dev device.Device,
-	luaAPI *LuaAPI,
+	luaAPI LuaAPIInterface,
 	logger *logrus.Logger,
 	script string,
 	args map[string]string,
 	stdout, stderr io.Writer,
-	drainTimeout time.Duration,
 	characteristicReadTimeout time.Duration,
 	characteristicWriteTimeout time.Duration,
 	opts *ScriptOptions,
@@ -62,16 +59,18 @@ func ExecuteDeviceScriptWithOutput(
 
 		// Configure timeouts if provided (0 = use defaults from LuaAPI)
 		if characteristicReadTimeout > 0 {
-			luaAPI.characteristicReadTimeout = characteristicReadTimeout
+			luaAPI.SetCharacteristicReadTimeout(characteristicReadTimeout)
 		}
 		if characteristicWriteTimeout > 0 {
-			luaAPI.characteristicWriteTimeout = characteristicWriteTimeout
+			luaAPI.SetCharacteristicWriteTimeout(characteristicWriteTimeout)
 		}
 	}
 
-	// Configure Lua package.path for module loading
-	if opts != nil && (opts.ScriptPath != "" || len(opts.AdditionalLuaPaths) > 0) {
-		luaAPI.LuaEngine.SetScriptSearchPaths(opts.ScriptPath, opts.AdditionalLuaPaths)
+	// Configure secure module loading paths
+	if opts != nil && (opts.ScriptPath != "" || len(opts.LibraryPaths) > 0) {
+		if err := luaAPI.SetPackagePaths(opts.ScriptPath, opts.LibraryPaths); err != nil {
+			return fmt.Errorf("invalid library path: %w", err)
+		}
 	}
 
 	logger.WithField("script_size", len(script)).Debug("Starting Lua script execution")
@@ -99,22 +98,11 @@ func ExecuteDeviceScriptWithOutput(
 		drainer = NewOutputDrainer(ctx, luaAPI.OutputChannel(), logger, stdout, stderr)
 
 		defer func() {
-			// Stop the drainer after a script completes
+			// Stop the drainer and wait for it to fully exit.
+			// The drainer has an internal 100ms timeout in drainWithTimeout()
+			// to prevent indefinite blocking.
 			drainer.Cancel()
-
-			// Wait for the goroutine to exit with a timeout
-			done := make(chan struct{})
-			groutine.Go(ctx, fmt.Sprintf("drainer-wait-script-%d", len(script)), func(ctx context.Context) {
-				drainer.Wait()
-				close(done)
-			})
-
-			select {
-			case <-done:
-				// finished successfully
-			case <-time.After(drainTimeout / 2):
-				logger.WithField("timeout", drainTimeout/2).Debug("Output drainer did not exit within timeout")
-			}
+			drainer.Wait()
 		}()
 	}
 

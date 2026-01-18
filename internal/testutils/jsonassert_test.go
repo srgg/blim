@@ -6,7 +6,7 @@ import (
 	"github.com/stretchr/testify/suite"
 )
 
-// JSONAsserterTestSuite provides comprehensive tests for JSONAsserter functionality
+// JSONAsserterTestSuite provides comprehensive device_test for JSONAsserter functionality
 type JSONAsserterTestSuite struct {
 	suite.Suite
 }
@@ -872,7 +872,7 @@ func (s *JSONAsserterTestSuite) TestIgnoredFieldsRemovedBeforeSorting() {
 	// If ignored fields are present during sorting, they affect the sort order even though
 	// they're ignored during comparison, breaking IgnoreArrayOrder functionality.
 	//
-	// In the tests: Two BLE notifications with same data but different call_counts would sort
+	// In the device_test: Two BLE notifications with same data but different call_counts would sort
 	// in opposite order if call_count is included in the sort key.
 
 	ja := NewJSONAsserter(s.T()).WithOptions(

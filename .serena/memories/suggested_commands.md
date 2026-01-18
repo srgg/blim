@@ -8,9 +8,9 @@ make clean          # Clean build artifacts
 
 ## Testing Commands
 ```bash
-make test           # Run all tests
+make test           # Run all device_test
 make test TEST=<name>    # Run specific test by name
-make test-race      # Run tests with race detection
+make test-race      # Run device_test with race detection
 make test-coverage  # Generate coverage report (HTML + summary)
 make coverage       # Show coverage summary only
 ```

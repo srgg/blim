@@ -105,7 +105,7 @@ func TestDeviceConnect(t *testing.T) { ... }
 // Benchmark function
 func BenchmarkScan(b *testing.B) { ... }
 
-// Table-driven tests
+// Table-driven device_test
 func TestDeviceValidation(t *testing.T) {
     tests := []struct {
         name    string

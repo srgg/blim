@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"syscall"
@@ -23,7 +24,6 @@ const (
 	defaultPreScanTimeout            = 3 * time.Second
 	defaultDescriptorReadTimeout     = 0               // 0 means use inspector's default (2s); explicit 0 skips reads
 	defaultCharacteristicReadTimeout = 5 * time.Second // Timeout for characteristic read operations
-	luaOutputPollInterval            = 50 * time.Millisecond
 )
 
 // inspectCmd represents the inspect command
@@ -151,12 +151,14 @@ func runInspect(cmd *cobra.Command, args []string) error {
 	}
 
 	// Use a Lua script for output generation
+	stdout := cmd.OutOrStdout()
+	stderr := cmd.ErrOrStderr()
 	processDevice := func(dev device.Device) (any, error) {
 		// Update the device with advertisement data if we have it
 		if adv != nil {
 			dev.Update(adv)
 		}
-		return nil, executeInspectLuaScript(ctx, dev, logger, opts.CharacteristicReadTimeout)
+		return nil, executeInspectLuaScript(ctx, dev, logger, opts.CharacteristicReadTimeout, stdout, stderr)
 	}
 
 	_, err = inspector.InspectDevice(ctx, address, opts, logger, progressCallback, processDevice)
@@ -164,7 +166,7 @@ func runInspect(cmd *cobra.Command, args []string) error {
 }
 
 // executeInspectLuaScript runs the embedded inspect.lua script with the connected device
-func executeInspectLuaScript(ctx context.Context, dev device.Device, logger *logrus.Logger, characteristicReadTimeout time.Duration) error {
+func executeInspectLuaScript(ctx context.Context, dev device.Device, logger *logrus.Logger, characteristicReadTimeout time.Duration, stdout, stderr io.Writer) error {
 	// Determine format based on --json flag
 	format := "text"
 	if inspectJSON {
@@ -186,9 +188,8 @@ func executeInspectLuaScript(ctx context.Context, dev device.Device, logger *log
 		logger,
 		blecli.DefaultInspectLuaScript,
 		args,
-		os.Stdout,
-		os.Stderr,
-		luaOutputPollInterval,
+		stdout,
+		stderr,
 		characteristicReadTimeout,
 		0,   // write timeout not needed for inspect
 		nil, // no script options for embedded scripts

@@ -3,15 +3,17 @@
 package main
 
 import (
+	"bytes"
 	"encoding/hex"
 	"testing"
 	"time"
 
 	"github.com/srg/blim/internal/device"
+	"github.com/srg/blim/internal/testutils"
 	"github.com/stretchr/testify/suite"
 )
 
-// ReadTestSuite tests read command with mock BLE peripheral
+// ReadTestSuite device_test read command with mock BLE peripheral
 type ReadTestSuite struct {
 	CommandTestSuite
 	originalFlags struct {
@@ -24,7 +26,7 @@ type ReadTestSuite struct {
 	}
 }
 
-// SetupSuite runs once before all tests in the suite
+// SetupSuite runs once before all device_test in the suite
 func (suite *ReadTestSuite) SetupSuite() {
 	suite.CommandTestSuite.SetupSuite()
 
@@ -37,7 +39,7 @@ func (suite *ReadTestSuite) SetupSuite() {
 	suite.originalFlags.readTimeout = readTimeout
 }
 
-// TearDownSuite runs once after all tests in the suite
+// TearDownSuite runs once after all device_test in the suite
 func (suite *ReadTestSuite) TearDownSuite() {
 	// Restore original flag values
 	readServiceUUID = suite.originalFlags.readServiceUUID
@@ -46,8 +48,6 @@ func (suite *ReadTestSuite) TearDownSuite() {
 	readHex = suite.originalFlags.readHex
 	readWatch = suite.originalFlags.readWatch
 	readTimeout = suite.originalFlags.readTimeout
-
-	suite.CommandTestSuite.TearDownSuite()
 }
 
 // SetupTest runs before each test in the suite
@@ -55,46 +55,47 @@ func (suite *ReadTestSuite) SetupTest() {
 	// Configure peripheral with readable characteristics and descriptors
 	// Note: Uses custom JSON instead of AmbiguousCharPeripheral because
 	// descriptor 2902 in 180d/2a37 has value [1, 0] (enabled) for testing
-	suite.WithPeripheral().
-		FromJSON(`{
-			"services": [
-				{
-					"uuid": "180d",
-					"characteristics": [
-						{
-							"uuid": "2a37",
-							"properties": "read,notify",
-							"value": [0, 90],
-							"descriptors": [
-								{"uuid": "2902", "value": [1, 0]}
-							]
-						},
-						{"uuid": "2a38", "properties": "read", "value": [1]}
-					]
-				},
-				{
-					"uuid": "180f",
-					"characteristics": [
-						{
-							"uuid": "2a19",
-							"properties": "read,notify",
-							"value": [75],
-							"descriptors": [
-								{"uuid": "2902", "value": [0, 0]},
-								{"uuid": "2901", "value": [66, 97, 116, 116, 101, 114, 121]}
-							]
-						}
-					]
-				},
-				{
-					"uuid": "1800",
-					"characteristics": [
-						{"uuid": "2a37", "properties": "read", "value": [99]}
-					]
-				}
-			]
-		}`).
-		Build()
+	suite.GivenPeripheral(func(builder *testutils.PeripheralDeviceBuilder) {
+		builder.
+			FromJSON(`{
+				"services": [
+					{
+						"uuid": "180d",
+						"characteristics": [
+							{
+								"uuid": "2a37",
+								"properties": "read,notify",
+								"value": [0, 90],
+								"descriptors": [
+									{"uuid": "2902", "value": [1, 0]}
+								]
+							},
+							{"uuid": "2a38", "properties": "read", "value": [1]}
+						]
+					},
+					{
+						"uuid": "180f",
+						"characteristics": [
+							{
+								"uuid": "2a19",
+								"properties": "read,notify",
+								"value": [75],
+								"descriptors": [
+									{"uuid": "2902", "value": [0, 0]},
+									{"uuid": "2901", "value": [66, 97, 116, 116, 101, 114, 121]}
+								]
+							}
+						]
+					},
+					{
+						"uuid": "1800",
+						"characteristics": [
+							{"uuid": "2a37", "properties": "read", "value": [99]}
+						]
+					}
+				]
+			}`)
+	})
 
 	suite.CommandTestSuite.SetupTest()
 
@@ -116,8 +117,7 @@ func (suite *ReadTestSuite) TestMultiRead_TwoChars_SameService() {
 	//
 	// TEST SCENARIO: Read 2a37,2a38 from 180d → prefixed output → both values present
 
-	dev, cleanup := suite.ConnectDevice("")
-	defer cleanup()
+	dev := suite.Connect("test")
 	conn := dev.GetConnection()
 
 	readHex = true
@@ -125,10 +125,10 @@ func (suite *ReadTestSuite) TestMultiRead_TwoChars_SameService() {
 	_, _, chars, err := resolveCharacteristics(conn, "2a37,2a38", "180d")
 	suite.Require().NoError(err, "resolution MUST succeed")
 
-	output := suite.CaptureStdout(func() {
-		err = performMultiRead(chars)
-		suite.Require().NoError(err, "multi-read MUST succeed")
-	})
+	var buf bytes.Buffer
+	err = performMultiRead(&buf, chars)
+	suite.Require().NoError(err, "multi-read MUST succeed")
+	output := buf.String()
 
 	suite.Assert().Contains(output, "2a37:", "output MUST contain 2a37 prefix")
 	suite.Assert().Contains(output, "2a38:", "output MUST contain 2a38 prefix")
@@ -139,8 +139,7 @@ func (suite *ReadTestSuite) TestMultiRead_CrossService() {
 	//
 	// TEST SCENARIO: Read 2a38 (180d) and 2a19 (180f) → both read successfully
 
-	dev, cleanup := suite.ConnectDevice("")
-	defer cleanup()
+	dev := suite.Connect("test")
 	conn := dev.GetConnection()
 
 	readHex = true
@@ -148,10 +147,10 @@ func (suite *ReadTestSuite) TestMultiRead_CrossService() {
 	_, _, chars, err := resolveCharacteristics(conn, "2a38,2a19", "")
 	suite.Require().NoError(err, "cross-service resolution MUST succeed")
 
-	output := suite.CaptureStdout(func() {
-		err = performMultiRead(chars)
-		suite.Require().NoError(err, "multi-read MUST succeed")
-	})
+	var buf bytes.Buffer
+	err = performMultiRead(&buf, chars)
+	suite.Require().NoError(err, "multi-read MUST succeed")
+	output := buf.String()
 
 	suite.Assert().Contains(output, "2a38:", "output MUST contain 2a38 prefix")
 	suite.Assert().Contains(output, "2a19:", "output MUST contain 2a19 prefix")
@@ -162,8 +161,7 @@ func (suite *ReadTestSuite) TestSingleRead_NoPrefix() {
 	//
 	// TEST SCENARIO: Read single 2a19 → output without prefix → raw value only
 
-	dev, cleanup := suite.ConnectDevice("")
-	defer cleanup()
+	dev := suite.Connect("test")
 	conn := dev.GetConnection()
 
 	readHex = true
@@ -177,10 +175,10 @@ func (suite *ReadTestSuite) TestSingleRead_NoPrefix() {
 		char = c
 	}
 
-	output := suite.CaptureStdout(func() {
-		err = performReadWithPrefix(char, nil, false)
-		suite.Require().NoError(err, "read MUST succeed")
-	})
+	var buf bytes.Buffer
+	err = performReadWithPrefix(&buf, char, nil, false)
+	suite.Require().NoError(err, "read MUST succeed")
+	output := buf.String()
 
 	suite.Assert().NotContains(output, ":", "single-char output MUST NOT contain prefix")
 	suite.Assert().Contains(output, "4b", "output MUST contain hex value (75 = 0x4b)")
@@ -215,8 +213,7 @@ func (suite *ReadTestSuite) TestDescriptorRead_UniqueDescriptor() {
 	//
 	// TEST SCENARIO: Read 2901 (only in 2a19) → resolves and reads successfully
 
-	dev, cleanup := suite.ConnectDevice("")
-	defer cleanup()
+	dev := suite.Connect("test")
 	conn := dev.GetConnection()
 
 	readHex = true
@@ -233,8 +230,7 @@ func (suite *ReadTestSuite) TestDescriptorRead_WithExplicitPath() {
 	//
 	// TEST SCENARIO: Read 2902 from 180d/2a37 → resolves correctly
 
-	dev, cleanup := suite.ConnectDevice("")
-	defer cleanup()
+	dev := suite.Connect("test")
 	conn := dev.GetConnection()
 
 	readHex = true
@@ -253,8 +249,8 @@ func (suite *ReadTestSuite) TestDescriptorRead_AmbiguousWithoutPath() {
 	//
 	// TEST SCENARIO: Read 2902 without path → fails with ambiguity error
 
-	dev, cleanup := suite.ConnectDevice("")
-	defer cleanup()
+	//dev, cleanup := suite.ConnectDevice("")
+	dev := suite.Connect("test")
 	conn := dev.GetConnection()
 
 	_, _, _, err := resolveDescriptor(conn, "2902", "", "")

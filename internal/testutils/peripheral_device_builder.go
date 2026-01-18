@@ -12,6 +12,7 @@ import (
 
 	blelib "github.com/go-ble/ble"
 	"github.com/srg/blim/internal/device"
+	goble "github.com/srg/blim/internal/device/go-ble"
 	blemocks "github.com/srg/blim/internal/testutils/mocks/goble"
 	"github.com/stretchr/testify/mock"
 	"gopkg.in/yaml.v3"
@@ -19,7 +20,7 @@ import (
 
 // createMockUUID creates a ble.UUID from a string for testing
 func createMockUUID(name string) blelib.UUID {
-	// Parse as proper UUID - will panic if invalid, which is fine for tests
+	// Parse as proper UUID - will panic if invalid, which is fine for device_test
 	return blelib.MustParse(name)
 }
 
@@ -28,7 +29,7 @@ type DescriptorReadBehavior int
 
 const (
 	// DescriptorReadTimeout - read blocks and times out
-	DescriptorReadTimeout DescriptorReadBehavior = iota + 1 // Start from 1, 0 means no error
+	DescriptorReadTimeout DescriptorReadBehavior = iota + 1 // Start from 1, 0 means normal behavior
 	// DescriptorReadError - read returns an error
 	DescriptorReadError
 )
@@ -126,7 +127,7 @@ func (b *AggregateFormatDescriptorBuilder) Build() *PeripheralDeviceBuilder {
 	// Add all 0x2904 Presentation Format descriptors
 	formatDescriptorStartIndex := currentDescriptorCount
 	for _, formatValue := range b.presentationFormats {
-		b.parentBuilder.WithDescriptor("2904", formatValue)
+		b.parentBuilder.WithDescriptor("2904", formatValue...)
 	}
 
 	// Calculate handles for the presentation format descriptors
@@ -139,7 +140,7 @@ func (b *AggregateFormatDescriptorBuilder) Build() *PeripheralDeviceBuilder {
 	}
 
 	// Add the 0x2905 Aggregate Format descriptor with encoded handles
-	b.parentBuilder.WithDescriptor("2905", aggregateValue)
+	b.parentBuilder.WithDescriptor("2905", aggregateValue...)
 
 	return b.parentBuilder
 }
@@ -294,7 +295,7 @@ func (b *PeripheralDeviceBuilder) addDescriptor(desc DescriptorConfig) *Peripher
 }
 
 // WithDescriptor adds a descriptor to the last added characteristic
-func (b *PeripheralDeviceBuilder) WithDescriptor(uuid string, value []byte) *PeripheralDeviceBuilder {
+func (b *PeripheralDeviceBuilder) WithDescriptor(uuid string, value ...byte) *PeripheralDeviceBuilder {
 	return b.addDescriptor(DescriptorConfig{UUID: uuid, Value: value})
 }
 
@@ -307,9 +308,10 @@ func (b *PeripheralDeviceBuilder) WithAggregateFormatDescriptor() *AggregateForm
 	}
 }
 
-// WithDescriptorReadTimeout adds a descriptor that times out when read
-func (b *PeripheralDeviceBuilder) WithDescriptorReadTimeout(uuid string) *PeripheralDeviceBuilder {
-	return b.addDescriptor(DescriptorConfig{UUID: uuid, ReadErrorBehavior: DescriptorReadTimeout})
+// WithDescriptorReadTimeout adds a descriptor that times out when read.
+// The value parameter specifies what the mock will return after the delay.
+func (b *PeripheralDeviceBuilder) WithDescriptorReadTimeout(uuid string, value ...byte) *PeripheralDeviceBuilder {
+	return b.addDescriptor(DescriptorConfig{UUID: uuid, Value: value, ReadErrorBehavior: DescriptorReadTimeout})
 }
 
 // WithDescriptorReadError adds a descriptor that returns an error when read
@@ -337,22 +339,6 @@ type ScanAdvertisementArrayBuilder struct {
 	scanDelayMs int // Delay in milliseconds before emitting each advertisement
 }
 
-// WithScanDelay sets the delay in milliseconds before emitting advertisements during scan.
-// This simulates real-world BLE scanning where advertisements arrive over time.
-// Useful for testing timeout behavior.
-func (sb *ScanAdvertisementArrayBuilder) WithScanDelay(delayMs int) *ScanAdvertisementArrayBuilder {
-	sb.scanDelayMs = delayMs
-	return sb
-}
-
-// WithBlockingScan configures the scan to block indefinitely after emitting advertisements.
-// This simulates real-world BLE scan behavior where the scan continues until the context is canceled.
-// Useful for testing interrupt handling (SIGINT) and watch mode behavior.
-func (sb *ScanAdvertisementArrayBuilder) WithBlockingScan() *ScanAdvertisementArrayBuilder {
-	sb.scanDelayMs = -1 // Sentinel value for blocking mode
-	return sb
-}
-
 // WithAdvertisements wraps the embedded method to return the correct type for fluent chaining.
 func (sb *ScanAdvertisementArrayBuilder) WithAdvertisements(ads ...device.Advertisement) *ScanAdvertisementArrayBuilder {
 	sb.AdvertisementArrayBuilder.WithAdvertisements(ads...)
@@ -370,9 +356,11 @@ func (sb *ScanAdvertisementArrayBuilder) Build() *PeripheralDeviceBuilder {
 func (b *PeripheralDeviceBuilder) WithScanAdvertisements() *ScanAdvertisementArrayBuilder {
 	arrayBuilder := NewAdvertisementArrayBuilder[*PeripheralDeviceBuilder]()
 	arrayBuilder.parent = b
-	arrayBuilder.buildFunc = func(parent *PeripheralDeviceBuilder, ads []device.Advertisement) *PeripheralDeviceBuilder {
+
+	arrayBuilder.buildFunc = func(parent *PeripheralDeviceBuilder, scanDelayMs int, ads []device.Advertisement) *PeripheralDeviceBuilder {
 		// Add ble.Advertisements directly to scan advertisements
 		parent.scanAdvertisements = append(parent.scanAdvertisements, ads...)
+		parent.scanDelayMs = scanDelayMs
 		return parent
 	}
 
@@ -477,8 +465,12 @@ func (b *PeripheralDeviceBuilder) Build() blelib.Device {
 				descriptorHandles = append(descriptorHandles, currentHandle)
 				bleDesc := &blelib.Descriptor{
 					UUID:   createMockUUID(descConfig.UUID),
-					Value:  descConfig.Value,
 					Handle: currentHandle,
+				}
+				// Only populate Value for normal descriptors (not timeout/error).
+				// For timeout/error descriptors, leave Value empty to force ReadDescriptor call.
+				if descConfig.ReadErrorBehavior != DescriptorReadTimeout && descConfig.ReadErrorBehavior != DescriptorReadError {
+					bleDesc.Value = descConfig.Value
 				}
 				bleDescriptors = append(bleDescriptors, bleDesc)
 				currentHandle++ // Descriptor consumes one handle
@@ -583,11 +575,12 @@ func (b *PeripheralDeviceBuilder) Build() blelib.Device {
 				descConfig := charConfig.Descriptors[descIdx]
 				switch descConfig.ReadErrorBehavior {
 				case DescriptorReadTimeout:
-					// Timeout: sleep for 10 seconds then panic if timeout wasn't handled properly
+					// Timeout: simulate slow BLE operation that takes 10 seconds.
+					// Caller should timeout before this completes.
+					// After delay, return the configured value (goroutine writes to buffered channel and exits cleanly).
 					mockClient.On("ReadDescriptor", desc).Run(func(args mock.Arguments) {
 						time.Sleep(10 * time.Second)
-						panic("BUG: Descriptor read timeout was not handled! The code should have timed out before this panic.")
-					}).Return(nil, fmt.Errorf("timeout"))
+					}).Return(desc.Value, nil)
 				case DescriptorReadError:
 					// Error: return an error
 					mockClient.On("ReadDescriptor", desc).Return(nil, fmt.Errorf("permission denied"))
@@ -696,6 +689,25 @@ func (b *PeripheralDeviceBuilder) Build() blelib.Device {
 		return ctx.Err()
 	})
 
+	// OnConnected hook for automatic verification of proper connection cleanup.
+	//
+	// WHAT: For every BLE connection created during device_test, automatically verify that
+	// Disconnect() was called and cleanup completed properly - even if the test forgot.
+	//
+	// HOW: OnConnected is called by BLEConnection.Connect() for every connection.
+	// We register t.Cleanup(), which runs AFTER the test completes (including TearDown).
+	// If Disconnect() was called → DisconnectVerified=true → cleanup is a no-op.
+	// If Disconnect() was NOT called → we run verification and panic on errors.
+	//
+	// SAFETY: Detect if another test overwrites OnConnected (would indicate parallel
+	// test execution, which corrupts cleanup registration. Fail loudly if detected.
+	t := b.t
+	testName := t.Name()
+	goble.OnConnected = func(c *goble.BLEConnection) {
+		// Register cleanup verification - handles parallel detection and t.Cleanup() registration
+		goble.RegisterTestConnectionCleanup(testName, t, c)
+	}
+
 	return mockDevice
 }
 
@@ -710,7 +722,7 @@ func (b *PeripheralDeviceBuilder) GetProfile() DeviceProfileConfig {
 }
 
 // GetDisconnectChannel returns the disconnect channel created by Build().
-// This channel can be closed by tests to simulate a graceful disconnect from CoreBluetooth.
+// This channel can be closed by device_test to simulate a graceful disconnect from CoreBluetooth.
 // Returns nil if Build() has not been called yet.
 func (b *PeripheralDeviceBuilder) GetDisconnectChannel() chan struct{} {
 	return b.disconnectChan

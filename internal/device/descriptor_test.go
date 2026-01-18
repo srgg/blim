@@ -1,8 +1,11 @@
-package device
+//go:build test
+
+package device_test
 
 import (
 	"testing"
 
+	"github.com/srg/blim/internal/device"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -40,7 +43,7 @@ func TestDescriptorError_Error(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			descErr := &DescriptorError{
+			descErr := &device.DescriptorError{
 				Reason: tt.reason,
 				Err:    tt.err,
 			}
@@ -57,13 +60,13 @@ func TestParseExtendedProperties(t *testing.T) {
 	tests := []struct {
 		name     string
 		data     []byte
-		expected *ExtendedProperties
+		expected *device.ExtendedProperties
 		wantErr  bool
 	}{
 		{
 			name: "both properties disabled",
 			data: []byte{0x00, 0x00},
-			expected: &ExtendedProperties{
+			expected: &device.ExtendedProperties{
 				ReliableWrite:       false,
 				WritableAuxiliaries: false,
 			},
@@ -72,7 +75,7 @@ func TestParseExtendedProperties(t *testing.T) {
 		{
 			name: "reliable write enabled",
 			data: []byte{0x01, 0x00},
-			expected: &ExtendedProperties{
+			expected: &device.ExtendedProperties{
 				ReliableWrite:       true,
 				WritableAuxiliaries: false,
 			},
@@ -81,7 +84,7 @@ func TestParseExtendedProperties(t *testing.T) {
 		{
 			name: "writable auxiliaries enabled",
 			data: []byte{0x02, 0x00},
-			expected: &ExtendedProperties{
+			expected: &device.ExtendedProperties{
 				ReliableWrite:       false,
 				WritableAuxiliaries: true,
 			},
@@ -90,7 +93,7 @@ func TestParseExtendedProperties(t *testing.T) {
 		{
 			name: "both properties enabled",
 			data: []byte{0x03, 0x00},
-			expected: &ExtendedProperties{
+			expected: &device.ExtendedProperties{
 				ReliableWrite:       true,
 				WritableAuxiliaries: true,
 			},
@@ -118,7 +121,7 @@ func TestParseExtendedProperties(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := ParseExtendedProperties(tt.data)
+			result, err := device.ParseExtendedProperties(tt.data)
 			if tt.wantErr {
 				assert.Error(t, err)
 				assert.Nil(t, result)
@@ -138,13 +141,13 @@ func TestParseClientConfig(t *testing.T) {
 	tests := []struct {
 		name     string
 		data     []byte
-		expected *ClientConfig
+		expected *device.ClientConfig
 		wantErr  bool
 	}{
 		{
 			name: "both disabled",
 			data: []byte{0x00, 0x00},
-			expected: &ClientConfig{
+			expected: &device.ClientConfig{
 				Notifications: false,
 				Indications:   false,
 			},
@@ -153,7 +156,7 @@ func TestParseClientConfig(t *testing.T) {
 		{
 			name: "notifications enabled",
 			data: []byte{0x01, 0x00},
-			expected: &ClientConfig{
+			expected: &device.ClientConfig{
 				Notifications: true,
 				Indications:   false,
 			},
@@ -162,7 +165,7 @@ func TestParseClientConfig(t *testing.T) {
 		{
 			name: "indications enabled",
 			data: []byte{0x02, 0x00},
-			expected: &ClientConfig{
+			expected: &device.ClientConfig{
 				Notifications: false,
 				Indications:   true,
 			},
@@ -171,7 +174,7 @@ func TestParseClientConfig(t *testing.T) {
 		{
 			name: "both enabled",
 			data: []byte{0x03, 0x00},
-			expected: &ClientConfig{
+			expected: &device.ClientConfig{
 				Notifications: true,
 				Indications:   true,
 			},
@@ -193,7 +196,7 @@ func TestParseClientConfig(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := ParseClientConfig(tt.data)
+			result, err := device.ParseClientConfig(tt.data)
 			if tt.wantErr {
 				assert.Error(t, err)
 				assert.Nil(t, result)
@@ -213,13 +216,13 @@ func TestParseServerConfig(t *testing.T) {
 	tests := []struct {
 		name     string
 		data     []byte
-		expected *ServerConfig
+		expected *device.ServerConfig
 		wantErr  bool
 	}{
 		{
 			name: "broadcasts disabled",
 			data: []byte{0x00, 0x00},
-			expected: &ServerConfig{
+			expected: &device.ServerConfig{
 				Broadcasts: false,
 			},
 			wantErr: false,
@@ -227,7 +230,7 @@ func TestParseServerConfig(t *testing.T) {
 		{
 			name: "broadcasts enabled",
 			data: []byte{0x01, 0x00},
-			expected: &ServerConfig{
+			expected: &device.ServerConfig{
 				Broadcasts: true,
 			},
 			wantErr: false,
@@ -248,7 +251,7 @@ func TestParseServerConfig(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := ParseServerConfig(tt.data)
+			result, err := device.ParseServerConfig(tt.data)
 			if tt.wantErr {
 				assert.Error(t, err)
 				assert.Nil(t, result)
@@ -317,7 +320,7 @@ func TestParseUserDescription(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := ParseUserDescription(tt.data)
+			result, err := device.ParseUserDescription(tt.data)
 			if tt.wantErr {
 				assert.Error(t, err)
 			} else {
@@ -336,14 +339,14 @@ func TestParsePresentationFormat(t *testing.T) {
 	tests := []struct {
 		name     string
 		data     []byte
-		expected *PresentationFormat
+		expected *device.PresentationFormat
 		wantErr  bool
 	}{
 		{
 			name: "valid format - uint8",
 			data: []byte{0x04, 0x00, 0x00, 0x27, 0x01, 0x00, 0x00},
-			expected: &PresentationFormat{
-				Format:      FormatUint8,
+			expected: &device.PresentationFormat{
+				Format:      device.FormatUint8,
 				Exponent:    0,
 				Unit:        0x2700, // unitless
 				Namespace:   0x01,   // Bluetooth SIG
@@ -354,8 +357,8 @@ func TestParsePresentationFormat(t *testing.T) {
 		{
 			name: "valid format - sint16 with exponent",
 			data: []byte{0x0E, 0xFE, 0x2F, 0x27, 0x01, 0x01, 0x00},
-			expected: &PresentationFormat{
-				Format:      FormatSint16,
+			expected: &device.PresentationFormat{
+				Format:      device.FormatSint16,
 				Exponent:    -2, // int8(-2)
 				Unit:        0x272F,
 				Namespace:   0x01,
@@ -366,8 +369,8 @@ func TestParsePresentationFormat(t *testing.T) {
 		{
 			name: "valid format - UTF8 string",
 			data: []byte{0x19, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
-			expected: &PresentationFormat{
-				Format:      FormatUTF8,
+			expected: &device.PresentationFormat{
+				Format:      device.FormatUTF8,
 				Exponent:    0,
 				Unit:        0x0000,
 				Namespace:   0x00,
@@ -397,7 +400,7 @@ func TestParsePresentationFormat(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := ParsePresentationFormat(tt.data)
+			result, err := device.ParsePresentationFormat(tt.data)
 			if tt.wantErr {
 				assert.Error(t, err)
 				assert.Nil(t, result)
@@ -417,13 +420,13 @@ func TestParseValidRange(t *testing.T) {
 	tests := []struct {
 		name     string
 		data     []byte
-		expected *ValidRange
+		expected *device.ValidRange
 		wantErr  bool
 	}{
 		{
 			name: "2 byte range",
 			data: []byte{0x00, 0xFF},
-			expected: &ValidRange{
+			expected: &device.ValidRange{
 				MinValue: []byte{0x00},
 				MaxValue: []byte{0xFF},
 			},
@@ -432,7 +435,7 @@ func TestParseValidRange(t *testing.T) {
 		{
 			name: "4 byte range (uint16 min/max)",
 			data: []byte{0x00, 0x00, 0xFF, 0xFF},
-			expected: &ValidRange{
+			expected: &device.ValidRange{
 				MinValue: []byte{0x00, 0x00},
 				MaxValue: []byte{0xFF, 0xFF},
 			},
@@ -441,7 +444,7 @@ func TestParseValidRange(t *testing.T) {
 		{
 			name: "odd length range",
 			data: []byte{0x00, 0x00, 0xFF},
-			expected: &ValidRange{
+			expected: &device.ValidRange{
 				MinValue: []byte{0x00},
 				MaxValue: []byte{0x00, 0xFF},
 			},
@@ -463,7 +466,7 @@ func TestParseValidRange(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := ParseValidRange(tt.data)
+			result, err := device.ParseValidRange(tt.data)
 			if tt.wantErr {
 				assert.Error(t, err)
 				assert.Nil(t, result)
@@ -491,14 +494,14 @@ func TestParseDescriptorValue(t *testing.T) {
 			name:         "extended properties descriptor",
 			uuid:         "2900",
 			data:         []byte{0x01, 0x00},
-			expectedType: &ExtendedProperties{},
+			expectedType: &device.ExtendedProperties{},
 			wantErr:      false,
 		},
 		{
 			name:         "extended properties descriptor with dashes",
 			uuid:         "0x2900",
 			data:         []byte{0x01, 0x00},
-			expectedType: &ExtendedProperties{},
+			expectedType: &device.ExtendedProperties{},
 			wantErr:      false,
 		},
 		{
@@ -512,28 +515,28 @@ func TestParseDescriptorValue(t *testing.T) {
 			name:         "client config descriptor",
 			uuid:         "2902",
 			data:         []byte{0x01, 0x00},
-			expectedType: &ClientConfig{},
+			expectedType: &device.ClientConfig{},
 			wantErr:      false,
 		},
 		{
 			name:         "server config descriptor",
 			uuid:         "2903",
 			data:         []byte{0x01, 0x00},
-			expectedType: &ServerConfig{},
+			expectedType: &device.ServerConfig{},
 			wantErr:      false,
 		},
 		{
 			name:         "presentation format descriptor",
 			uuid:         "2904",
 			data:         []byte{0x04, 0x00, 0x00, 0x27, 0x01, 0x00, 0x00},
-			expectedType: &PresentationFormat{},
+			expectedType: &device.PresentationFormat{},
 			wantErr:      false,
 		},
 		{
 			name:         "valid range descriptor",
 			uuid:         "2906",
 			data:         []byte{0x00, 0xFF},
-			expectedType: &ValidRange{},
+			expectedType: &device.ValidRange{},
 			wantErr:      false,
 		},
 		{
@@ -568,7 +571,7 @@ func TestParseDescriptorValue(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := ParseDescriptorValue(tt.uuid, tt.data, nil)
+			result, err := device.ParseDescriptorValue(tt.uuid, tt.data, nil)
 			if tt.wantErr {
 				assert.Error(t, err)
 			} else {
@@ -600,11 +603,11 @@ func TestParseDescriptorValue_NormalizedUUID(t *testing.T) {
 
 	for _, uuid := range uuidVariants {
 		t.Run("uuid_variant_"+uuid, func(t *testing.T) {
-			result, err := ParseDescriptorValue(uuid, testData, nil)
+			result, err := device.ParseDescriptorValue(uuid, testData, nil)
 			require.NoError(t, err)
-			assert.IsType(t, &ClientConfig{}, result)
+			assert.IsType(t, &device.ClientConfig{}, result)
 
-			clientConfig := result.(*ClientConfig)
+			clientConfig := result.(*device.ClientConfig)
 			assert.True(t, clientConfig.Notifications)
 			assert.False(t, clientConfig.Indications)
 		})
@@ -617,19 +620,19 @@ func TestParsePresentationFormat_AllFormatTypes(t *testing.T) {
 		format uint8
 		name   string
 	}{
-		{FormatBoolean, "boolean"},
-		{FormatUint8, "uint8"},
-		{FormatUint16, "uint16"},
-		{FormatSint8, "sint8"},
-		{FormatSint16, "sint16"},
-		{FormatFloat32, "float32"},
-		{FormatUTF8, "utf8"},
+		{device.FormatBoolean, "boolean"},
+		{device.FormatUint8, "uint8"},
+		{device.FormatUint16, "uint16"},
+		{device.FormatSint8, "sint8"},
+		{device.FormatSint16, "sint16"},
+		{device.FormatFloat32, "float32"},
+		{device.FormatUTF8, "utf8"},
 	}
 
 	for _, tt := range formatTests {
 		t.Run(tt.name, func(t *testing.T) {
 			data := []byte{tt.format, 0x00, 0x00, 0x27, 0x01, 0x00, 0x00}
-			result, err := ParsePresentationFormat(data)
+			result, err := device.ParsePresentationFormat(data)
 			require.NoError(t, err)
 			assert.Equal(t, tt.format, result.Format)
 		})
@@ -678,7 +681,7 @@ func TestParseExtendedProperties_BitMasking(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := ParseExtendedProperties(tt.data)
+			result, err := device.ParseExtendedProperties(tt.data)
 			require.NoError(t, err)
 			assert.Equal(t, tt.expectedReliable, result.ReliableWrite)
 			assert.Equal(t, tt.expectedWritable, result.WritableAuxiliaries)

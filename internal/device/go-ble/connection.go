@@ -39,7 +39,7 @@ const (
 // Device Factory
 // ----------------------------
 
-// DeviceFactory creates ble.Device instances (can be overridden in tests)
+// DeviceFactory creates ble.Device instances (can be overridden in device_test)
 //
 //nolint:revive // DeviceFactory name is intentional for test mocking as device.DeviceFactory
 var DeviceFactory = func() (ble.Device, error) {
@@ -70,10 +70,13 @@ type BLEConnection struct {
 	ctx    context.Context
 	cancel context.CancelCauseFunc
 
-	// DrainDuration is the time to wait before draining cached CoreBluetooth values.
-	// CoreBluetooth delivers stale cached values ~100-200ms after SetNotify(true).
-	// Default: 500ms. Set to 0 in tests to skip the drain delay.
-	DrainDuration time.Duration
+	valuePool *BLEVValuePool
+	ConnDiag  *ConnectionDiagnostics // nil in production, populated in test
+}
+
+// GetSubscriptionManager returns the subscription manager for testing.
+func (c *BLEConnection) GetSubscriptionManager() *SubscriptionManager {
+	return c.subMgr
 }
 
 // GetCharacteristic retrieves a characteristic by service and characteristic UUID.
@@ -131,7 +134,7 @@ func (c *BLEConnection) GetService(uuid string) (device.Service, error) {
 }
 
 // ProcessCharacteristicNotification processes incoming characteristic notification data
-// This method is extracted to allow reuse in both production subscriptions and tests
+// This method is extracted to allow reuse in both production subscriptions and device_test
 func (c *BLEConnection) ProcessCharacteristicNotification(char *BLECharacteristic, data []byte) {
 	// Diagnostic logging: trace when notifications arrive from CoreBluetooth
 	if c.logger != nil {
@@ -143,7 +146,7 @@ func (c *BLEConnection) ProcessCharacteristicNotification(char *BLECharacteristi
 	}
 
 	// Create a new BLE value from the received data (from pool for hot-path performance)
-	val := newPooledBLEValue(data)
+	val := c.valuePool.newPooledBLEValue(data)
 	val.Char = char
 
 	// Update the characteristic's value
@@ -164,13 +167,13 @@ func (c *BLEConnection) SimulateNotification(char *BLECharacteristic, data []byt
 
 func NewBLEConnection(logger *logrus.Logger) *BLEConnection {
 	return &BLEConnection{
-		client:        nil,
-		services:      make(map[string]*BLEService),
-		subMgr:        NewSubscriptionManager(logger),
-		ctx:           context.Background(),
-		cancel:        nil,
-		logger:        logger,
-		DrainDuration: DefaultDrainDuration,
+		client:    nil,
+		services:  make(map[string]*BLEService),
+		subMgr:    NewSubscriptionManager(logger),
+		ctx:       context.Background(),
+		cancel:    nil,
+		logger:    logger,
+		valuePool: NewBLEVValuePool(),
 	}
 }
 
@@ -202,7 +205,7 @@ func (c *BLEConnection) Connect(ctx context.Context, address string, opts *devic
 		"timeout": opts.ConnectTimeout,
 	}).Info("Connecting to BLE device...")
 
-	// Create a BLE device using the factory (allows for mocking in tests)
+	// Create a BLE device using the factory (allows for mocking in device_test)
 	dev, err := DeviceFactory()
 	if err != nil {
 		c.logger.WithField("error", err).Error("Failed to create BLE device")
@@ -248,7 +251,7 @@ func (c *BLEConnection) Connect(ctx context.Context, address string, opts *devic
 	for _, bleSvc := range bleProfile.Services {
 		svcRawUUID := bleSvc.UUID.String()
 		svcUUID := device.NormalizeUUID(svcRawUUID)
-		c.logger.WithField("service_uuid", svcRawUUID).Debug("Found service UUID")
+		c.logger.WithField("service_uuid", svcRawUUID).Trace("Found service UUID")
 		svc, ok := c.services[svcUUID]
 		if !ok {
 			svc = &BLEService{
@@ -265,7 +268,7 @@ func (c *BLEConnection) Connect(ctx context.Context, address string, opts *devic
 			c.logger.WithFields(logrus.Fields{
 				"service_uuid": svcUUID,
 				"char_uuid":    charRawUUID,
-			}).Debug("Found characteristic UUID")
+			}).Trace("Found characteristic UUID")
 			characteristic, ok := svc.Characteristics[charUUID]
 			if !ok {
 				// Use descriptors from DiscoverProfile (already discovered)
@@ -333,6 +336,9 @@ func (c *BLEConnection) Connect(ctx context.Context, address string, opts *devic
 	// Use WithCancelCause to propagate connection errors to all subscribers
 	c.ctx, c.cancel = context.WithCancelCause(ctx)
 
+	// Initialize connection-level diagnostics (nil in production, populated in test)
+	c.ConnDiag = newConnectionDiagnostics(c)
+
 	// Monitor go-ble client Disconnected() channel (Darwin-specific)
 	// This detects when CoreBluetooth reports a disconnection
 	if darwinClient, ok := client.(interface{ Disconnected() <-chan struct{} }); ok {
@@ -366,9 +372,9 @@ func (c *BLEConnection) Connect(ctx context.Context, address string, opts *devic
 		"address":         address,
 		"services":        len(c.services),
 		"characteristics": totalChars,
-	}).Info("BLE device connected successfully")
+	}).Info("BLE device connected successfully:\n", c.dumpBLEServicesUnsafe())
 
-	// Invoke connection callback if set (used for configuration, logging, instrumentation)
+	// Invoke a connection callback if set (used for configuration, logging, instrumentation)
 	if OnConnected != nil {
 		OnConnected(c)
 	}
@@ -376,45 +382,64 @@ func (c *BLEConnection) Connect(ctx context.Context, address string, opts *devic
 	return nil
 }
 
+// drainAndReleaseChannel drains all pending BLEValue objects from a channel and releases them to the pool.
+func drainAndReleaseChannel(ch chan *BLEValue) {
+	for {
+		select {
+		case v := <-ch:
+			if v == nil {
+				return
+			}
+			v.release()
+		default:
+			return
+		}
+	}
+}
+
 func (c *BLEConnection) Disconnect() error {
 	// Acquire and snapshot state, cancel subs under lock
 	c.connMutex.Lock()
+
+	// Grab the client and cancel the function to release the lock before blocking waits
+	cancel := c.cancel
+	client := c.client
+	var servicesCopy map[string]*BLEService
+
 	if c.client == nil || !c.isConnected {
 		c.connMutex.Unlock()
 		if c.logger != nil {
 			c.logger.Debug("Disconnect called but already disconnected")
 		}
 		return nil
+	} else {
+		// Connection mutex scope
+		defer c.connMutex.Unlock()
+
+		if c.logger != nil {
+			c.logger.WithFields(logrus.Fields{
+				"connection_ptr": fmt.Sprintf("%p", c),
+				"services":       len(c.services),
+			}).Info("Disconnecting BLE device...")
+		}
+
+		// Cancel all subscriptions via the manager
+		if c.logger != nil {
+			c.logger.Debug("Cancelling all active subscriptions...")
+		}
+		c.subMgr.CancelAll()
+
+		// Snapshot services to drain channels outside the lock
+		servicesCopy = make(map[string]*BLEService)
+		for k, v := range c.services {
+			servicesCopy[k] = v
+		}
+
+		// set fields to nil/false while still holding lock
+		c.client = nil
+		c.cancel = nil
+		c.isConnected = false
 	}
-
-	if c.logger != nil {
-		c.logger.WithFields(logrus.Fields{
-			"connection_ptr": fmt.Sprintf("%p", c),
-			"services":       len(c.services),
-		}).Info("Disconnecting BLE device...")
-	}
-
-	// Cancel all subscriptions via the manager
-	if c.logger != nil {
-		c.logger.Debug("Cancelling all active subscriptions...")
-	}
-	c.subMgr.CancelAll()
-
-	// Grab client and cancel the function to release the lock before blocking waits
-	client := c.client
-	cancel := c.cancel
-
-	// Snapshot services to drain channels outside the lock
-	servicesCopy := make(map[string]*BLEService)
-	for k, v := range c.services {
-		servicesCopy[k] = v
-	}
-
-	// set fields to nil/false while still holding lock
-	c.client = nil
-	c.cancel = nil
-	c.isConnected = false
-	c.connMutex.Unlock()
 
 	if c.logger != nil {
 		c.logger.Debug("Connection state transitioned to disconnected")
@@ -453,6 +478,13 @@ func (c *BLEConnection) Disconnect() error {
 			// Close channel to signal EOF - will be recreated on reconnect
 			char.CloseUpdates()
 		}
+	}
+
+	// Verify cleanup AFTER draining all channels (test build only, no-op in prod)
+	// VerifyDisconnectCleanup returns errors; caller must handle them.
+	// Use DiagnosticPanic for fail-fast behavior on explicit Disconnect().
+	if errors := c.ConnDiag.VerifyDisconnectCleanup(); len(errors) > 0 {
+		DiagnosticPanic(c.ConnDiag, errors, "Disconnect")
 	}
 
 	// Finally, disconnect the BLE client (network call) outside the lock
@@ -844,4 +876,56 @@ func (c *BLEConnection) unsubscribeInternal(opts *device.SubscribeOptions) error
 	}
 
 	return nil
+}
+
+// dumpBLEServicesUnsafe returns a concise, human-readable string of the BLEConnection services.
+func (c *BLEConnection) dumpBLEServicesUnsafe() string {
+	if len(c.services) == 0 {
+		return "<no services discovered>"
+	}
+
+	var b strings.Builder
+	for svcUUID, svc := range c.services {
+		fmt.Fprintf(&b, "Service: %s (%s)\n", svcUUID, svc.KnownName())
+		chars := svc.GetCharacteristics()
+		if len(chars) == 0 {
+			continue
+		}
+
+		for _, ch := range chars {
+			props := ch.GetProperties()
+			propNames := []string{}
+
+			addProp := func(p device.Property) {
+				if p != nil && p.Value() != 0 {
+					propNames = append(propNames, p.KnownName())
+				}
+			}
+
+			addProp(props.Broadcast())
+			addProp(props.Read())
+			addProp(props.Write())
+			addProp(props.WriteWithoutResponse())
+			addProp(props.Notify())
+			addProp(props.Indicate())
+			addProp(props.AuthenticatedSignedWrites())
+			addProp(props.ExtendedProperties())
+
+			_, _ = fmt.Fprintf(&b, "  Characteristic: %s (%s)", ch.UUID(), ch.KnownName())
+			if len(propNames) > 0 {
+				_, _ = fmt.Fprintf(&b, " %s", strings.Join(propNames, ", "))
+			}
+			_, _ = fmt.Fprintf(&b, "\n")
+
+			descs := ch.GetDescriptors()
+			if len(descs) == 0 {
+				continue
+			}
+			for _, d := range descs {
+				_, _ = fmt.Fprintf(&b, "    Descriptor: %s (%s)\n", d.UUID(), d.KnownName())
+			}
+		}
+	}
+
+	return b.String()
 }

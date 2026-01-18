@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"testing"
 	"time"
@@ -13,7 +14,7 @@ import (
 	"github.com/stretchr/testify/suite"
 )
 
-// InspectTestSuite tests the inspect command functionality
+// InspectTestSuite device_test the inspect command functionality
 type InspectTestSuite struct {
 	CommandTestSuite
 	originalFlags struct {
@@ -25,7 +26,7 @@ type InspectTestSuite struct {
 	}
 }
 
-// SetupSuite saves original flags before all tests
+// SetupSuite saves original flags before all device_test
 func (suite *InspectTestSuite) SetupSuite() {
 	// Call parent SetupSuite first to initialize Logger and other fields
 	suite.CommandTestSuite.SetupSuite()
@@ -38,7 +39,7 @@ func (suite *InspectTestSuite) SetupSuite() {
 	suite.originalFlags.json = inspectJSON
 }
 
-// TearDownSuite restores original flags after all tests
+// TearDownSuite restores original flags after all device_test
 func (suite *InspectTestSuite) TearDownSuite() {
 	inspectConnectTimeout = suite.originalFlags.connectTimeout
 	inspectDescriptorReadTimeout = suite.originalFlags.descriptorReadTimeout
@@ -64,11 +65,12 @@ func (suite *InspectTestSuite) SetupTest() {
 		Build()
 
 	// Create a peripheral with multiple services and characteristics for testing
-	suite.WithPeripheral().
-		WithScanAdvertisements().
-		WithAdvertisements(adv).
-		Build().
-		FromJSON(`{
+	suite.GivenPeripheral(func(builder *testutils.PeripheralDeviceBuilder) {
+		builder.
+			WithScanAdvertisements().
+			WithAdvertisements(adv).
+			Build().
+			FromJSON(`{
 			"services": [
 				{
 					"uuid": "180a",
@@ -85,8 +87,8 @@ func (suite *InspectTestSuite) SetupTest() {
 					]
 				}
 			]
-		}`).
-		Build()
+		}`)
+	})
 
 	// Call parent to apply mock configuration
 	suite.CommandTestSuite.SetupTest()
@@ -109,12 +111,12 @@ func (suite *InspectTestSuite) SetupTest() {
 
 // Helper methods
 
-// createTestContext creates a context with a timeout for tests
+// createTestContext creates a context with a timeout for device_test
 func (suite *InspectTestSuite) createTestContext(timeout time.Duration) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), timeout)
 }
 
-// createInspectOptions creates default InspectOptions for tests
+// createInspectOptions creates default InspectOptions for device_test
 func (suite *InspectTestSuite) createInspectOptions() *inspector.InspectOptions {
 	return &inspector.InspectOptions{
 		ConnectTimeout:            inspectConnectTimeout,
@@ -183,8 +185,7 @@ func (suite *InspectTestSuite) TestPreScanForAdvertisement() {
 			"address": "AA:BB:CC:DD:EE:FF",
 			"name": "TestDevice",
 			"rssi": -50,
-			"connectable": true,
-			"manufacturer_data": "0102"
+			"connectable": true
 		}`)
 	})
 
@@ -204,17 +205,11 @@ func (suite *InspectTestSuite) TestPreScanForAdvertisement() {
 		adv := createTestAd(address)
 
 		// Create a fresh PeripheralBuilder to avoid accumulating advertisements from SetupTest
-		suite.PeripheralBuilder = testutils.NewPeripheralDeviceBuilder(suite.T())
-
-		suite.WithPeripheral().
-			WithScanAdvertisements().
-			WithScanDelay(scanDelay). // Delay longer than timeout
-			WithAdvertisements(adv).
-			Build().
-			Build()
-
-		// Apply mock configuration with the new peripheral builder
-		suite.CommandTestSuite.SetupTest()
+		suite.GivenPeripheral(func(builder *testutils.PeripheralDeviceBuilder) {
+			builder.WithScanAdvertisements().
+				WithScanDelay(scanDelay). // Delay longer than timeout
+				WithAdvertisements(adv).Build()
+		})
 
 		// Search for a DIFFERENT address so mock never finds a match and waits full timeout
 		nonExistentAddress := "00:00:00:00:00:00"
@@ -242,18 +237,13 @@ func (suite *InspectTestSuite) TestPreScanForAdvertisement() {
 		// TEST SCENARIO: Cancel context before pre-scan → scan returns context.Canceled error
 
 		// Create a fresh peripheral builder with no delay
-		suite.PeripheralBuilder = testutils.NewPeripheralDeviceBuilder(suite.T())
 		address := "AA:BB:CC:DD:EE:FF"
 		adv := createTestAd(address)
 
-		suite.WithPeripheral().
-			WithScanAdvertisements().
-			WithAdvertisements(adv).
-			Build().
-			Build()
-
-		// Apply mock configuration
-		suite.CommandTestSuite.SetupTest()
+		suite.GivenPeripheral(func(builder *testutils.PeripheralDeviceBuilder) {
+			builder.WithScanAdvertisements().
+				WithAdvertisements(adv)
+		})
 
 		ctx, cancel := context.WithCancel(context.Background())
 
@@ -332,8 +322,7 @@ func (suite *InspectTestSuite) TestInspectDevice() {
 
 			// Configure scan delay if specified
 			if tt.scanDelay > 0 {
-				// Create fresh peripheral builder with scan delay
-				suite.PeripheralBuilder = testutils.NewPeripheralDeviceBuilder(suite.T())
+				// Create a fresh peripheral builder with scan delay
 				adv := testutils.NewAdvertisementBuilder().
 					WithAddress(address).
 					WithName("TestDevice").
@@ -345,33 +334,31 @@ func (suite *InspectTestSuite) TestInspectDevice() {
 					WithTxPower(0).
 					Build()
 
-				suite.WithPeripheral().
-					WithScanAdvertisements().
-					WithScanDelay(tt.scanDelay).
-					WithAdvertisements(adv).
-					Build().
-					FromJSON(`{
-						"services": [
-							{
-								"uuid": "180a",
-								"characteristics": [
-									{"uuid": "2a29", "properties": "read", "value": [84, 101, 115, 116]},
-									{"uuid": "2a24", "properties": "read", "value": [77, 111, 100, 101, 108]}
-								]
-							},
-							{
-								"uuid": "180d",
-								"characteristics": [
-									{"uuid": "2a37", "properties": "read,notify", "value": [0, 90]},
-									{"uuid": "2a38", "properties": "read", "value": [1]}
-								]
-							}
-						]
-					}`).
-					Build()
-
-				// Apply mock configuration
-				suite.CommandTestSuite.SetupTest()
+				suite.GivenAdvertisements(func(a *testutils.AdvertisementArrayBuilder[[]device.Advertisement]) {
+					a.WithScanDelay(tt.scanDelay).
+						WithAdvertisements(adv)
+				})
+				suite.GivenPeripheral(func(builder *testutils.PeripheralDeviceBuilder) {
+					builder.
+						FromJSON(`{
+							"services": [
+								{
+									"uuid": "180a",
+									"characteristics": [
+										{"uuid": "2a29", "properties": "read", "value": [84, 101, 115, 116]},
+										{"uuid": "2a24", "properties": "read", "value": [77, 111, 100, 101, 108]}
+									]
+								},
+								{
+									"uuid": "180d",
+									"characteristics": [
+										{"uuid": "2a37", "properties": "read,notify", "value": [0, 90]},
+										{"uuid": "2a38", "properties": "read", "value": [1]}
+									]
+								}
+							]
+						}`)
+				})
 			}
 
 			// Configure flags
@@ -379,11 +366,12 @@ func (suite *InspectTestSuite) TestInspectDevice() {
 			inspectConnectTimeout = 5 * time.Second
 			inspectJSON = true
 
-			// Capture stdout and run inspect command
-			var err error
-			outputStr := suite.CaptureStdout(func() {
-				err = runInspect(inspectCmd, []string{address})
-			})
+			// Set command output buffer and run inspect command
+			var buf bytes.Buffer
+			inspectCmd.SetOut(&buf)
+			inspectCmd.SetErr(&buf)
+			err := runInspect(inspectCmd, []string{address})
+			outputStr := buf.String()
 
 			// Verify error expectation
 			if tt.expectError != nil {

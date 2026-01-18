@@ -1,3 +1,5 @@
+//go:build test
+
 package lua
 
 import (
@@ -11,7 +13,6 @@ import (
 
 	"github.com/aarzilli/golua/lua"
 	"github.com/sirupsen/logrus"
-	"github.com/srg/blim/internal/testutils"
 	"github.com/stretchr/testify/suite"
 	suitelib "github.com/stretchr/testify/suite"
 )
@@ -20,16 +21,15 @@ import (
 type LuaEngineTestSuite struct {
 	suite.Suite
 
-	helper *testutils.TestHelper // Test helper with logging and assertions
-	logger *logrus.Logger        // Structured logger for test output
+	logger *logrus.Logger // Structured logger for test output
 
 	luaEngine        *LuaEngine
 	luaOutputCapture *LuaOutputCollector
 }
 
 func (suite *LuaEngineTestSuite) SetupSuite() {
-	suite.helper = testutils.NewTestHelper(suite.T())
-	suite.logger = suite.helper.Logger
+	suite.logger = logrus.New()
+	suite.logger.SetLevel(logrus.DebugLevel)
 }
 
 func (suite *LuaEngineTestSuite) SetupTest() {
@@ -139,7 +139,7 @@ func (suite *LuaEngineTestSuite) TestCapturePrintVariants() {
 	}
 }
 
-// TestCaptureIOWriteVariants tests io.write() capture with various argument types
+// TestCaptureIOWriteVariants device_test io.write() capture with various argument types
 func (suite *LuaEngineTestSuite) TestCaptureIOWriteVariants() {
 	// GOAL: Verify io.write() captures all argument types without automatic newlines
 	//
@@ -149,7 +149,7 @@ func (suite *LuaEngineTestSuite) TestCaptureIOWriteVariants() {
 		script   string
 		expected *regexp.Regexp
 	}{
-		// Basic io.write tests - NO automatic newline unlike print
+		// Basic io.write device_test - NO automatic newline unlike print
 		{"one string", `io.write("hello")`, regexp.MustCompile(`^hello$`)},
 		{"two strings", `io.write("foo", "bar")`, regexp.MustCompile(`^foobar$`)},
 		{"number", `io.write(123)`, regexp.MustCompile(`^123$`)},
@@ -199,7 +199,7 @@ func (suite *LuaEngineTestSuite) TestCaptureIOWriteVariants() {
 	}
 }
 
-// TestCaptureIOStderrWriteVariants tests io.stderr:write() capture with various argument types
+// TestCaptureIOStderrWriteVariants device_test io.stderr:write() capture with various argument types
 func (suite *LuaEngineTestSuite) TestCaptureIOStderrWriteVariants() {
 	// GOAL: Verify that io.stderr:write() captures stderr output correctly with various argument types
 	//
@@ -210,7 +210,7 @@ func (suite *LuaEngineTestSuite) TestCaptureIOStderrWriteVariants() {
 		script         string
 		expectedStderr string
 	}{
-		// Basic io.stderr:write tests - NO automatic newline
+		// Basic io.stderr:write device_test - NO automatic newline
 		{"one string", `io.stderr:write("error message")`, "error message"},
 		{"two strings", `io.stderr:write("error: ", "failed")`, "error: failed"},
 		{"number", `io.stderr:write(500)`, "500"},
@@ -261,7 +261,7 @@ func (suite *LuaEngineTestSuite) TestCaptureIOStderrWriteVariants() {
 	}
 }
 
-// TestCaptureMixedPrintAndIOWrite tests that print() and io.write() can be mixed
+// TestCaptureMixedPrintAndIOWrite device_test that print() and io.write() can be mixed
 func (suite *LuaEngineTestSuite) TestCaptureMixedPrintAndIOWrite() {
 	// GOAL: Verify print() and io.write() can be interleaved and preserve order
 	//
@@ -284,7 +284,7 @@ func (suite *LuaEngineTestSuite) TestCaptureMixedPrintAndIOWrite() {
 	suite.Equal(expected, got, "Mixed print and io.write should preserve order and newline behavior")
 }
 
-// TestJSONLibraryAvailability tests if the JSON library is properly loaded
+// TestJSONLibraryAvailability device_test if the JSON library is properly loaded
 func (suite *LuaEngineTestSuite) TestJSONLibraryAvailability() {
 	// GOAL: Verify embedded JSON library is available and functional in Lua environment
 	//
@@ -391,7 +391,7 @@ func (suite *LuaEngineTestSuite) TestExecuteScript_BlockedFunctions() {
 	}
 }
 
-// TestSafeWrapGoFunction tests that SafeWrapGoFunction properly handles panics
+// TestSafeWrapGoFunction device_test that SafeWrapGoFunction properly handles panics
 func (suite *LuaEngineTestSuite) TestSafeWrapGoFunction() {
 	suite.Run("ExpectedLuaError_PropagatesCorrectly", func() {
 		// Register a Go function that raises a Lua error
