@@ -5,6 +5,7 @@ package lua
 import (
 	"fmt"
 	"io"
+	"runtime"
 	"syscall"
 	"testing"
 	"time"
@@ -12,6 +13,8 @@ import (
 	_ "embed"
 
 	"github.com/srg/blim/internal/device"
+	goble "github.com/srg/blim/internal/device/go-ble"
+	"github.com/srg/blim/internal/groutine"
 	"github.com/srg/blim/internal/testutils"
 	suitelib "github.com/stretchr/testify/suite"
 )
@@ -73,6 +76,13 @@ func (t *testBridgeInfo) TriggerCallback(data []byte) {
 	if t.readCallback != nil {
 		t.readCallback(data)
 	}
+}
+
+// getBLEConnection extracts the underlying BLEConnection from a LuaAPI for white-box testing.
+// Used to verify subscription cleanup at the Go/BLE layer, not just Lua behavior.
+func getBLEConnection(api *LuaAPI) *goble.BLEConnection {
+	conn := api.device.GetConnection()
+	return conn.(*goble.BLEConnection)
 }
 
 // BLEAPI2TestSuite
@@ -3507,6 +3517,180 @@ func (suite *LuaApiTestSuite) TestSubscribersDoNotCompeteForNotifications() {
 			verify_all_values(vals_A, "A")
 			verify_all_values(vals_B, "B")
 		`)
+}
+
+// TestSubscriptionCancellation verifies subscription cleanup at the Go level.
+// These tests validate white-box behavior: that cancel() properly cleans up Go-level resources
+// (BLE connection subscriptions, callback refs) - not just Lua behavior.
+func (suite *LuaApiTestSuite) TestSubscriptionCancellation() {
+	suite.Run("External cancel verifies Go-level cleanup", func() {
+		// GOAL: Verify cancel() triggers explicit cancellation at BLE connection level
+		//
+		// TEST SCENARIO: Subscribe → cancel → verify Diag.CancelReason == Explicit and CleanedUp == true
+
+		ft := suite.Connect("01").FluentLuaTest()
+		api := ft.LuaAPI()
+		bleConn := getBLEConnection(api)
+
+		ft.MustExecuteScript(`
+			cancel = blim.subscribe{
+				services = {{ service = "1234", chars = {"5678"} }},
+				Mode = "EveryUpdate",
+				Callback = function(r) end
+			}
+		`)
+
+		// Verify subscription tracked
+		suite.Equal(1, len(bleConn.ConnDiag.Subscriptions))
+		sub := bleConn.ConnDiag.Subscriptions[0]
+
+		ft.MustExecuteScript(`cancel()`)
+
+		// Wait for cleanup goroutine
+		time.Sleep(50 * time.Millisecond)
+
+		// Verify Go-level cancellation
+		suite.Equal(goble.CancelReasonExplicit, sub.Diag.CancelReason)
+		suite.True(sub.Diag.CleanedUp)
+
+		// Verify Lua callback ref released
+		api.callbackRefsMu.Lock()
+		suite.Equal(0, len(api.subscriptionCallbackRefs))
+		api.callbackRefsMu.Unlock()
+	})
+
+	suite.Run("Self-cancel from callback verifies Go-level cleanup", func() {
+		// GOAL: Verify self-cancellation from callback triggers explicit cancel at BLE level
+		//
+		// TEST SCENARIO: Subscribe with self-cancel → emit notification → verify explicit cancel
+
+		ft := suite.Connect("01").FluentLuaTest()
+		api := ft.LuaAPI()
+		bleConn := getBLEConnection(api)
+
+		ft.EmmitData(func(emitter *testutils.PeripheralDataEmitter) {
+			time.Sleep(50 * time.Millisecond)
+			emitter.WithService("1234").WithCharacteristic("5678", 0x01).Emit(true)
+		})
+
+		ft.MustExecuteScript(`
+			blim.subscribe{
+				services = {{ service = "1234", chars = {"5678"} }},
+				Mode = "EveryUpdate",
+				Callback = function(record, cancel)
+					cancel()  -- Self-cancel on first notification
+				end
+			}
+			blim.sleep(100)
+		`)
+
+		// Verify Go-level cancellation
+		suite.Equal(1, len(bleConn.ConnDiag.Subscriptions))
+		sub := bleConn.ConnDiag.Subscriptions[0]
+		suite.Equal(goble.CancelReasonExplicit, sub.Diag.CancelReason)
+		suite.True(sub.Diag.CleanedUp)
+	})
+
+	suite.Run("Cancel is idempotent", func() {
+		// GOAL: Verify multiple cancel() calls don't crash or double-release
+		//
+		// TEST SCENARIO: Subscribe → cancel 3 times → no panic, still shows explicit cancel
+
+		ft := suite.Connect("01").FluentLuaTest()
+		api := ft.LuaAPI()
+		bleConn := getBLEConnection(api)
+
+		ft.MustExecuteScript(`
+			cancel = blim.subscribe{
+				services = {{ service = "1234", chars = {"5678"} }},
+				Mode = "EveryUpdate",
+				Callback = function(r) end
+			}
+			cancel()
+			cancel()
+			cancel()
+		`)
+
+		time.Sleep(50 * time.Millisecond)
+
+		// Verify single explicit cancel recorded
+		sub := bleConn.ConnDiag.Subscriptions[0]
+		suite.Equal(goble.CancelReasonExplicit, sub.Diag.CancelReason)
+		suite.True(sub.Diag.CleanedUp)
+
+		// Verify callback ref released exactly once
+		api.callbackRefsMu.Lock()
+		suite.Equal(0, len(api.subscriptionCallbackRefs))
+		api.callbackRefsMu.Unlock()
+	})
+
+	suite.Run("Stress test: no goroutine leaks after repeated subscribe/cancel cycles", func() {
+		// GOAL: Verify no goroutine leaks after many subscribe/cancel cycles
+		//
+		// TEST SCENARIO: 100 iterations of (10x subscribe, emit data, 10x cancel)
+		// Then verify goroutine count returns to baseline
+
+		ft := suite.Connect("01").FluentLuaTest()
+
+		// Force GC and stabilize goroutine count
+		runtime.GC()
+		time.Sleep(100 * time.Millisecond)
+		initialGoroutines := runtime.NumGoroutine()
+
+		const iterations = 100
+		const subscriptionsPerIteration = 10
+
+		for i := 0; i < iterations; i++ {
+			// Start background data emission for this iteration
+			ft.EmmitData(func(emitter *testutils.PeripheralDataEmitter) {
+				time.Sleep(10 * time.Millisecond)
+				for j := 0; j < subscriptionsPerIteration; j++ {
+					emitter.WithService("1234").WithCharacteristic("5678", byte(j)).Emit(true)
+				}
+			})
+
+			// Create 10 subscriptions and cancel them
+			ft.MustExecuteScript(fmt.Sprintf(`
+				local cancels = {}
+				for i = 1, %d do
+					cancels[i] = blim.subscribe{
+						services = {{ service = "1234", chars = {"5678"} }},
+						Mode = "EveryUpdate",
+						Callback = function(r) end
+					}
+				end
+				blim.sleep(20)  -- Allow some data to arrive
+				for i = 1, %d do
+					cancels[i]()
+				end
+			`, subscriptionsPerIteration, subscriptionsPerIteration))
+		}
+
+		// Stop the last collector goroutine (without closing the whole FluentLuaTest)
+		if c := ft.Collector(); c != nil {
+			_ = c.Stop()
+		}
+
+		// Allow cleanup goroutines to finish
+		time.Sleep(1 * time.Second)
+		runtime.GC()
+		time.Sleep(200 * time.Millisecond)
+		runtime.GC()
+		time.Sleep(100 * time.Millisecond)
+
+		finalGoroutines := runtime.NumGoroutine()
+		leakedGoroutines := finalGoroutines - initialGoroutines
+
+		// Dump named goroutines if leak detected
+		const maxAllowedLeak = 0
+		if leakedGoroutines > maxAllowedLeak {
+			suite.T().Logf("Goroutines:\n%s", groutine.Dump())
+		}
+
+		suite.LessOrEqual(leakedGoroutines, maxAllowedLeak,
+			"Goroutine leak detected after %d iterations: initial=%d, final=%d, leaked=%d",
+			iterations, initialGoroutines, finalGoroutines, leakedGoroutines)
+	})
 }
 
 // TestLuaAPITestSuite runs the test suite using testify/suite

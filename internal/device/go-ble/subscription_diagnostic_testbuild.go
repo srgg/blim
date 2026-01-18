@@ -277,8 +277,8 @@ type SubscriptionDiagnostics struct {
 	CleanedUpAt  time.Time    // When cleanup completed
 
 	// Captured before cancel (set by wrapped cancel)
-	ValuesBeforeCancel    int64
-	CallbacksBeforeCancel int64
+	ValuesBeforeCancel     int64
+	SubscriberCountsBefore map[string]int // Subscriber counts per char, for exit verification
 
 	// Verification results (set after cancel completes)
 	CleanupVerified bool
@@ -289,11 +289,12 @@ type SubscriptionDiagnostics struct {
 // MUST be called under connection mutex for consistent values.
 func newSubscriptionDiagnostics(chars []*BLECharacteristic) *SubscriptionDiagnostics {
 	d := &SubscriptionDiagnostics{
-		GoroutinesAtStart:  runtime.NumGoroutine(),
-		CreatedAt:          time.Now(),
-		CharUUIDs:          make([]string, len(chars)),
-		FirstSubscriberFor: make(map[string]bool),
-		Chars:              chars,
+		GoroutinesAtStart:      runtime.NumGoroutine(),
+		CreatedAt:              time.Now(),
+		CharUUIDs:              make([]string, len(chars)),
+		FirstSubscriberFor:     make(map[string]bool),
+		Chars:                  chars,
+		SubscriberCountsBefore: make(map[string]int),
 	}
 	for i, c := range chars {
 		d.CharUUIDs[i] = c.UUID()
@@ -333,11 +334,78 @@ func (d *SubscriptionDiagnostics) MarkImplicitCancel() {
 	}
 }
 
-// MarkCleanedUp records that runSubscription exited cleanly
+// MarkCleanedUp records that runSubscription exited cleanly and verifies cleanup for explicit cancel.
 func (d *SubscriptionDiagnostics) MarkCleanedUp() {
 	if d != nil {
 		d.CleanedUp = true
 		d.CleanedUpAt = time.Now()
+
+		if d.CancelReason == CancelReasonExplicit {
+			d.verifyExplicitCancel()
+		}
+	}
+}
+
+// verifyExplicitCancel runs cleanup verification for explicit cancel.
+// Called from runSubscription exit when CancelReason == CancelReasonExplicit.
+// At exit point we can verify: context cancelled, fan-outs stopped, no goroutine leaks.
+// We skip: subscriber count check (we just decremented), subscription goroutine check (we ARE it).
+func (d *SubscriptionDiagnostics) verifyExplicitCancel() {
+	if d == nil || d.CancelReason != CancelReasonExplicit {
+		return
+	}
+
+	var errors CleanupErrors
+
+	// Context must be cancelled - proves cancel() triggered the exit
+	if d.sub != nil && d.sub.ctx.Err() == nil {
+		errors = append(errors, CleanupError{"context", "not cancelled"})
+	}
+
+	// Fan-outs we started must be stopped (if we were last subscriber)
+	for _, c := range d.Chars {
+		if d.FirstSubscriberFor[c.UUID()] {
+			if c.HasActiveFanOut() && d.SubscriberCountsBefore[c.UUID()] == 1 {
+				errors = append(errors, CleanupError{"fanout",
+					fmt.Sprintf("fan-out for %s still running (we were last)", c.UUID())})
+			}
+		}
+	}
+
+	// Fan-out goroutines we started must have exited (if we were last subscriber)
+	for _, c := range d.Chars {
+		if d.FirstSubscriberFor[c.UUID()] && d.SubscriberCountsBefore[c.UUID()] == 1 {
+			fanoutName := fmt.Sprintf("fanout-%s", c.UUID())
+			if groutine.IsRunning(fanoutName) {
+				errors = append(errors, CleanupError{"fanout_goroutine",
+					fmt.Sprintf("%q still running", fanoutName)})
+			}
+		}
+	}
+
+	// NOTE: Goroutine delta check removed - unreliable in multi-subscription scenarios.
+	// Other subscriptions created after this one have legitimate goroutines.
+
+	// BLEValue pool check - outstanding shouldn't increase
+	if d.conn != nil {
+		outstanding := d.conn.valuePool.Outstanding()
+		if outstanding > d.ValuesBeforeCancel {
+			errors = append(errors, CleanupError{"blevalue_pool",
+				fmt.Sprintf("outstanding increased: %d -> %d", d.ValuesBeforeCancel, outstanding)})
+		}
+	}
+
+	// Store results
+	d.CleanupVerified = true
+	d.CleanupErrors = errors
+
+	// Panic if errors (respects PanicOnCleanupFailure flag)
+	if len(errors) > 0 {
+		var connDiag *ConnectionDiagnostics
+		if d.conn != nil {
+			connDiag = d.conn.ConnDiag
+		}
+		DiagnosticPanic(connDiag, errors, fmt.Sprintf("subscription %q exit verification", d.sub.Name))
 	}
 }
 
@@ -498,118 +566,21 @@ func wrapCancelFunc(diag *SubscriptionDiagnostics, cancel func()) func() {
 		return cancel // Production path: no overhead
 	}
 
-	var once sync.Once // Prevent double-call issues
+	var once sync.Once
 	return func() {
 		once.Do(func() {
 			// Mark explicit cancel
 			diag.MarkExplicitCancel()
 
-			// Capture state BEFORE cancel
+			// Capture state before cancel (for verification at goroutine exit)
 			diag.ValuesBeforeCancel = diag.conn.valuePool.Outstanding()
-			diag.CallbacksBeforeCancel = diag.CallbackCount.Load()
-
-			subscriberCountsBefore := make(map[string]int)
 			for _, c := range diag.Chars {
-				subscriberCountsBefore[c.UUID()] = c.SubscriberCount()
+				diag.SubscriberCountsBefore[c.UUID()] = c.SubscriberCount()
 			}
 
-			// Call actual cancel
+			// Call actual cancel - verification happens in runSubscription exit
 			cancel()
-
-			// Wait for goroutines to exit
-			time.Sleep(CleanupDelay)
-
-			// Verify state AFTER cancel
-			var errors CleanupErrors
-
-			// Context must be cancelled (FIX: nil check for diag.sub)
-			if diag.sub != nil && diag.sub.ctx.Err() == nil {
-				errors = append(errors, CleanupError{"context", "not cancelled"})
-			}
-
-			// Channel must be drained (allow small buffer for race) - FIX: nil check
-			if diag.sub != nil && len(diag.sub.updates) > 0 {
-				errors = append(errors, CleanupError{"channel",
-					fmt.Sprintf("%d values remaining", len(diag.sub.updates))})
-			}
-
-			// Subscriber counts must decrease (we unregistered)
-			for _, c := range diag.Chars {
-				before := subscriberCountsBefore[c.UUID()]
-				after := c.SubscriberCount()
-				if after >= before && before > 0 {
-					errors = append(errors, CleanupError{"subscribers",
-						fmt.Sprintf("char %s: count didn't decrease (%d -> %d)", c.UUID(), before, after)})
-				}
-			}
-
-			// Fan-outs we started must be stopped (if we were last subscriber)
-			for _, c := range diag.Chars {
-				if diag.FirstSubscriberFor[c.UUID()] {
-					if c.HasActiveFanOut() && subscriberCountsBefore[c.UUID()] == 1 {
-						errors = append(errors, CleanupError{"fanout",
-							fmt.Sprintf("fan-out for %s still running (we were last)", c.UUID())})
-					}
-				}
-			}
-
-			// Subscription goroutine must have exited - FIX: nil check
-			if diag.sub != nil && diag.sub.Name != "" && groutine.IsRunning(diag.sub.Name) {
-				errors = append(errors, CleanupError{"subscription_goroutine",
-					fmt.Sprintf("%q still running", diag.sub.Name)})
-			}
-
-			// Fan-out goroutines we started must have exited
-			for _, c := range diag.Chars {
-				if diag.FirstSubscriberFor[c.UUID()] && subscriberCountsBefore[c.UUID()] == 1 {
-					fanoutName := fmt.Sprintf("fanout-%s", c.UUID())
-					if groutine.IsRunning(fanoutName) {
-						errors = append(errors, CleanupError{"fanout_goroutine",
-							fmt.Sprintf("%q still running", fanoutName)})
-					}
-				}
-			}
-
-			// Goroutine delta check (allow +2 for system goroutines)
-			delta := diag.GoroutinesDelta()
-			if delta > 2 {
-				errors = append(errors, CleanupError{"goroutine_leak",
-					fmt.Sprintf("delta is +%d (possible leak)", delta)})
-			}
-
-			// Verify chars have zero subscribers when we were last subscriber
-			for _, c := range diag.Chars {
-				if subscriberCountsBefore[c.UUID()] == 1 && c.SubscriberCount() > 0 {
-					errors = append(errors, CleanupError{
-						Check:   "char_subscribers_zero",
-						Message: fmt.Sprintf("char %s has %d subscribers (MUST BE 0, we were last)", c.UUID(), c.SubscriberCount()),
-					})
-				}
-			}
-
-			// NOTE: Fan-out verification is handled above at lines 578-586 with correct
-			// "we were last subscriber" condition. No duplicate check needed here.
-
-			// BLEValue pool check
-			outstanding := diag.conn.valuePool.Outstanding()
-			if outstanding > diag.ValuesBeforeCancel {
-				errors = append(errors, CleanupError{"blevalue_pool",
-					fmt.Sprintf("outstanding increased: %d -> %d", diag.ValuesBeforeCancel, outstanding)})
-			}
-
-			// Store results
-			diag.CleanupVerified = true
-			diag.CleanupErrors = errors
-
-			// Call DiagnosticPanic if errors (respects PanicOnCleanupFailure flag)
-			if len(errors) > 0 {
-				var connDiag *ConnectionDiagnostics
-				if diag.conn != nil {
-					connDiag = diag.conn.ConnDiag
-				}
-				DiagnosticPanic(connDiag, errors, fmt.Sprintf("cancel() for subscription %q", diag.sub.Name))
-			}
-		}) // End of once.Do
+		})
 	}
 }
 

@@ -337,11 +337,14 @@ Service: 180f
   Char: 2a19
 ```
 
-### `blim.subscribe(config)`
+### `blim.subscribe(config)` → `cancel`
 Subscribes to BLE characteristic notifications/indications.
 
 **Parameters:**
 - `config` (table) - Subscription configuration
+
+**Returns:**
+- `cancel` (function) - Call to stop the subscription and release resources. Safe to call multiple times (idempotent).
 
 **Config fields:**
 - `services` (array) - List of service/characteristic subscriptions
@@ -354,7 +357,10 @@ Subscribes to BLE characteristic notifications/indications.
   - `"Batched"` - Multiple updates batched together
   - `"Aggregated"` - Latest value per characteristic
 - `MaxRate` (number, optional) - Max callback rate in milliseconds (0 = unlimited)
-- `Callback` (function) - Called with each record: `function(record)`
+- `DrainDuration` (number, optional) - Milliseconds to discard stale cached values before delivering fresh notifications (0 = disabled). Useful for characteristics that buffer old values.
+- `Callback` (function) - Called with each record: `function(record, cancel)`
+  - `record` (table) - The notification data
+  - `cancel` (function) - Call to stop this subscription from within the callback (self-cancellation)
 
 **Record structure:**
 - `TsUs` (number) - Timestamp in microseconds
@@ -470,6 +476,68 @@ blim.subscribe{
         local status_data = record.Values["ff32"]
         if status_data then
             print("Status:", string.byte(status_data, 1))
+        end
+    end
+}
+```
+
+**Example: Subscription cancellation**
+```lua
+-- Store the cancel function returned by subscribe
+local cancel = blim.subscribe{
+    services = {
+        {service="180d", chars={"2a37"}}
+    },
+    Mode = "EveryUpdate",
+    Callback = function(record)
+        print("Heart rate update received")
+    end
+}
+
+-- Later, stop the subscription
+blim.sleep(5000)  -- Run for 5 seconds
+cancel()          -- Stop subscription and release resources
+print("Subscription stopped")
+```
+
+**Example: Self-cancellation from callback**
+```lua
+-- Cancel subscription after receiving N samples
+local sample_count = 0
+local max_samples = 10
+
+blim.subscribe{
+    services = {
+        {service="180d", chars={"2a37"}}
+    },
+    Mode = "EveryUpdate",
+    Callback = function(record, cancel)
+        sample_count = sample_count + 1
+        print("Sample", sample_count)
+
+        if sample_count >= max_samples then
+            cancel()  -- Stop from within callback
+            print("Collected", max_samples, "samples, stopping")
+        end
+    end
+}
+```
+
+**Example: Conditional self-cancellation**
+```lua
+-- Stop subscription when a specific value is received
+blim.subscribe{
+    services = {
+        {service="180f", chars={"2a19"}}  -- Battery
+    },
+    Mode = "EveryUpdate",
+    Callback = function(record, cancel)
+        local battery = string.byte(record.Values["2a19"], 1)
+        print("Battery:", battery, "%")
+
+        if battery < 20 then
+            print("Low battery detected, stopping monitoring")
+            cancel()
         end
     end
 }
@@ -810,18 +878,7 @@ Writes data to a characteristic and waits for a response.
 ble.write_with_response("1234", "5678", "\x01\x00")
 ```
 
-#### `ble.unsubscribe(service_uuid, char_uuid)`
-Unsubscribes from characteristic notifications.
-
-```lua
--- Stop receiving heart rate updates
-ble.unsubscribe("180d", "2a37")
-
--- Unsubscribe from all
-ble.unsubscribe()
-```
-
-**Note:** The handle-based `read()` method is already implemented. The function-based API and other handle methods (`write()`, `subscribe()`, etc.) will be added in future updates.
+**Note:** The handle-based `read()` and `write()` methods are already implemented. Subscription cancellation is available via the cancel function returned by `blim.subscribe()`. The function-based API will be added in future updates.
 
 ---
 
@@ -852,10 +909,10 @@ Both approaches will coexist - use whichever fits your use case.
 - ✅ **Service listing** - `blim.list()` enumerates all GATT services and characteristics
 - ✅ **Device information** - `blim.device` provides device metadata and advertisement data
 - ✅ **Subscriptions** - `blim.subscribe()` supports notifications/indications with multiple streaming modes
+- ✅ **Subscription cancellation** - `blim.subscribe()` returns cancel function; callback receives cancel for self-cancellation
 - ✅ **PTY bridge** - `blim.bridge.pty_write()`, `pty_read()`, and `pty_on_data()` for async PTY communication
 
 **⚠️ Planned features:**
-- ⚠️ **Unsubscribe** - Subscriptions run indefinitely (no way to stop them)
 - ⚠️ **Function-based API** - Simplified `ble.read()`, `ble.write()` not yet available
 - ⚠️ **More parsers** - Currently only Appearance characteristic has a registered parser
 

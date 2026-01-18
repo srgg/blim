@@ -89,4 +89,3 @@ func ParseFileURL(fileURL string) (filePath string, params map[string]string, er
 
 	return filePath, params, nil
 }
-

@@ -72,12 +72,13 @@ type LuaAPI struct {
 	device                     device.Device
 	LuaEngine                  *LuaEngine
 	logger                     *logrus.Logger
-	bridge                     BridgeInfo    // Optional bridge information
-	characteristicReadTimeout  time.Duration // Default timeout for characteristic read operations
-	characteristicWriteTimeout time.Duration // Default timeout for characteristic write operations
-	closeOnce                  sync.Once     // Ensures Close() is idempotent
-	ptyCallbackRef             int           // Tracks PTY callback ref for cleanup; lua.LUA_NOREF if none
-	subscriptionCallbackRefs   []int         // Tracks subscription callback refs for cleanup
+	bridge                     BridgeInfo       // Optional bridge information
+	characteristicReadTimeout  time.Duration    // Default timeout for characteristic read operations
+	characteristicWriteTimeout time.Duration    // Default timeout for characteristic write operations
+	closeOnce                  sync.Once        // Ensures Close() is idempotent
+	ptyCallbackRef             int              // Tracks PTY callback ref for cleanup; lua.LUA_NOREF if none
+	subscriptionCallbackRefs   map[int]struct{} // Tracks subscription callback refs for cleanup (O(1) add/remove)
+	callbackRefsMu             sync.Mutex       // Protects subscriptionCallbackRefs map
 }
 
 // NewBLEAPI2 creates a new BLE API instance with subscription support
@@ -88,7 +89,8 @@ func NewBLEAPI2(device device.Device, logger *logrus.Logger) *LuaAPI {
 		LuaEngine:                  NewLuaEngine(logger),
 		characteristicReadTimeout:  DefaultCharacteristicReadTimeout,
 		characteristicWriteTimeout: DefaultCharacteristicWriteTimeout,
-		ptyCallbackRef:             lua.LUA_NOREF, // No callback registered initially
+		ptyCallbackRef:             lua.LUA_NOREF,          // No callback registered initially
+		subscriptionCallbackRefs:   make(map[int]struct{}), // Initialize map for O(1) add/remove
 	}
 
 	r.Reset()
@@ -133,6 +135,28 @@ func (api *LuaAPI) releasePTYCallbackRef(L *lua.State) {
 		L.Unref(lua.LUA_REGISTRYINDEX, api.ptyCallbackRef)
 		api.ptyCallbackRef = lua.LUA_NOREF
 	}
+}
+
+// releaseCallbackRefInternal removes a callback reference from tracking and releases it from the Lua registry.
+// Called from Lua context - uses doWithStateInternal (no lock acquisition).
+func (api *LuaAPI) releaseCallbackRefInternal(ref int) {
+	api.callbackRefsMu.Lock()
+	delete(api.subscriptionCallbackRefs, ref)
+	api.callbackRefsMu.Unlock()
+
+	api.LuaEngine.doWithStateInternal(func(L *lua.State) interface{} {
+		L.Unref(lua.LUA_REGISTRYINDEX, ref)
+		return nil
+	})
+}
+
+// releaseCallbackRef removes a callback reference from tracking and releases it from the Lua registry.
+// Called from Go context - uses DoWithState (acquires lock).
+func (api *LuaAPI) releaseCallbackRef(ref int) {
+	api.LuaEngine.DoWithState(func(L *lua.State) interface{} {
+		api.releaseCallbackRefInternal(ref)
+		return nil
+	})
 }
 
 // registerBridgeInfo registers the blim.bridge table with runtime bridge checking
@@ -405,7 +429,8 @@ func (api *LuaAPI) registerBlimAPI() {
 	})
 }
 
-// registerSubscribeFunction registers the ble.subscribe() function
+// registerSubscribeFunction registers the ble.subscribe() function.
+// Returns a cancel function to Lua for external subscription control.
 func (api *LuaAPI) registerSubscribeFunction(L *lua.State) {
 	api.SafePushGoFunction(L, "subscribe", func(L *lua.State) int {
 		// Expect a table as the first argument
@@ -421,14 +446,24 @@ func (api *LuaAPI) registerSubscribeFunction(L *lua.State) {
 			return 0
 		}
 
-		// Execute the subscription
-		err = api.executeSubscription(config)
+		// Execute the subscription and get cancel function
+		cancel, err := api.executeSubscription(config)
 		if err != nil {
 			L.RaiseError("Error executing subscription: " + err.Error())
 			return 0
 		}
 
-		return 0
+		// Return cancel function to Lua for external control
+		api.SafePushGoFunction(L, "cancel", func(L *lua.State) int {
+			if cancel != nil {
+				cancel()
+			}
+			return 0
+		})
+		// SafePushGoFunction pushes name and function; we only need the function
+		L.Remove(-2)
+
+		return 1 // Return 1 value (the cancel function)
 	})
 	L.SetTable(-3)
 }
@@ -749,8 +784,10 @@ func (api *LuaAPI) parseCharsArray(L *lua.State, tableIndex int) []string {
 	return chars
 }
 
-// executeSubscription creates and starts the actual BLE subscription
-func (api *LuaAPI) executeSubscription(config *LuaSubscriptionTable) error {
+// executeSubscription creates and starts the actual BLE subscription.
+// Returns a cancel function that cancels the subscription and releases the Lua callback reference.
+// The cancel function is safe to call multiple times (idempotent via sync.Once).
+func (api *LuaAPI) executeSubscription(config *LuaSubscriptionTable) (func(), error) {
 	api.logger.WithFields(logrus.Fields{
 		"services": len(config.Services),
 		"mode":     config.Mode,
@@ -772,19 +809,52 @@ func (api *LuaAPI) executeSubscription(config *LuaSubscriptionTable) error {
 	maxRate := time.Duration(config.MaxRate) * time.Millisecond
 	drainDuration := time.Duration(config.DrainDuration) * time.Millisecond
 
+	// Capture callback ref for use in callback and cancel closures
+	callbackRef := config.CallbackRef
+
+	// Variable to hold the wrapped cancel function; set after Subscribe returns.
+	// Callback closure captures this pointer to enable self-cancellation.
+	var cancel func()
+
 	// Create a callback that calls the Lua function (nil if no callback provided)
 	var callback func(*device.Record)
-	if config.CallbackRef != lua.LUA_NOREF {
+	if callbackRef != lua.LUA_NOREF {
 		// Track ref for cleanup in Close()
-		api.subscriptionCallbackRefs = append(api.subscriptionCallbackRefs, config.CallbackRef)
+		api.callbackRefsMu.Lock()
+		api.subscriptionCallbackRefs[callbackRef] = struct{}{}
+		api.callbackRefsMu.Unlock()
+
 		callback = func(record *device.Record) {
-			api.callLuaCallback(config.CallbackRef, record)
+			// Pass cancel function to Lua callback for self-cancellation
+			api.callLuaCallback(callbackRef, record, cancel)
 		}
 	}
 
 	// Call Subscribe on the connection
-	_, err := api.device.GetConnection().Subscribe(opts, pattern, maxRate, drainDuration, callback)
-	return err
+	rawCancel, err := api.device.GetConnection().Subscribe(opts, pattern, maxRate, drainDuration, callback)
+	if err != nil {
+		// Clean up tracked ref on subscribe failure
+		if callbackRef != lua.LUA_NOREF {
+			api.callbackRefsMu.Lock()
+			delete(api.subscriptionCallbackRefs, callbackRef)
+			api.callbackRefsMu.Unlock()
+		}
+		return nil, err
+	}
+
+	// Wrap rawCancel to also release the Lua callback reference (idempotent).
+	// Uses releaseCallbackRefInternal since cancel is always called from Lua context.
+	var cancelOnce sync.Once
+	cancel = func() {
+		cancelOnce.Do(func() {
+			rawCancel()
+			if callbackRef != lua.LUA_NOREF {
+				api.releaseCallbackRefInternal(callbackRef)
+			}
+		})
+	}
+
+	return cancel, nil
 }
 
 // callPTYDataCallback calls the Lua callback function when PTY data arrives
@@ -865,8 +935,9 @@ func (api *LuaAPI) callPTYDataCallback(callbackRef int, data []byte) error {
 	return nil
 }
 
-// callLuaCallback calls the Lua callback function with the record data
-func (api *LuaAPI) callLuaCallback(callbackRef int, record *device.Record) error {
+// callLuaCallback calls the Lua callback function with the record data and cancel function.
+// The cancel function is passed as the second argument to enable self-cancellation from Lua.
+func (api *LuaAPI) callLuaCallback(callbackRef int, record *device.Record, cancelFn func()) error {
 	api.logger.Debugf("[callLuaCallback] entry, callbackRef=%d", callbackRef)
 	if callbackRef == lua.LUA_NOREF {
 		api.logger.Debug("[callLuaCallback] LUA_NOREF, returning")
@@ -917,7 +988,7 @@ func (api *LuaAPI) callLuaCallback(callbackRef int, record *device.Record) error
 		// Push the callback function onto the stack using reference
 		L.RawGeti(lua.LUA_REGISTRYINDEX, callbackRef)
 
-		// Create a record table
+		// Create a record table (first argument)
 		L.NewTable()
 
 		// Set TsUs
@@ -970,9 +1041,19 @@ func (api *LuaAPI) callLuaCallback(callbackRef int, record *device.Record) error
 			L.SetTable(-3)
 		}
 
-		// Call the function with 1 argument (the record table)
+		// Push cancel function (second argument) for self-cancellation from Lua
+		api.SafePushGoFunction(L, "cancel", func(L *lua.State) int {
+			if cancelFn != nil {
+				cancelFn()
+			}
+			return 0
+		})
+		// SafePushGoFunction pushes name and function; we only need the function, so drop the name
+		L.Remove(-2)
+
+		// Call the function with 2 arguments (record table, cancel function)
 		// This can panic if StackTrace() crashes while building LuaError
-		if err := L.Call(1, 0); err != nil {
+		if err := L.Call(2, 0); err != nil {
 			// Log the error for debugging
 			api.logger.Errorf("Lua callback execution failed: %v", err)
 
@@ -1424,13 +1505,13 @@ func (api *LuaAPI) Close() {
 			// Release PTY callback ref
 			api.releasePTYCallbackRef(L)
 
-			// Release subscription callback refs
-			for _, ref := range api.subscriptionCallbackRefs {
-				if ref != lua.LUA_NOREF {
-					L.Unref(lua.LUA_REGISTRYINDEX, ref)
-				}
+			// Release subscription callback refs (map iteration)
+			api.callbackRefsMu.Lock()
+			for ref := range api.subscriptionCallbackRefs {
+				L.Unref(lua.LUA_REGISTRYINDEX, ref)
 			}
 			api.subscriptionCallbackRefs = nil
+			api.callbackRefsMu.Unlock()
 			return nil
 		})
 
