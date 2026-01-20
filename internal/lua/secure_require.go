@@ -237,7 +237,10 @@ func (s *SecureModuleLoader) Register(engine *LuaEngine) {
 			// STEP 5: Execute with (moduleName, fullPath) as arguments (Lua convention)
 			L.PushString(moduleName)
 			L.PushString(fullPath)
-			L.Call(2, 1) // 2 args, 1 result
+			if err := L.Call(2, 1); err != nil {
+				L.RaiseError(fmt.Sprintf("require('%s'): %s", moduleName, err.Error()))
+				return 0
+			}
 
 			// STEP 6: Cache in package.loaded
 			L.GetGlobal("package")

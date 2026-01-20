@@ -300,3 +300,69 @@ func TestSecureModuleLoader_PreloadedModules(t *testing.T) {
 		})
 	}
 }
+
+func TestSecureModuleLoader_SyntaxErrorInModule(t *testing.T) {
+	// GOAL: Verify syntax errors in required modules propagate to caller
+	//
+	// TEST SCENARIO: Require module with syntax error → error returned → contains "syntax error"
+
+	logger := logrus.New()
+	logger.SetLevel(logrus.DebugLevel)
+
+	tmpDir := t.TempDir()
+
+	// Create a module with invalid Lua syntax
+	badModulePath := filepath.Join(tmpDir, "bad_module.lua")
+	badModuleContent := `WHat is that on line 1
+return { name = "test" }`
+	require.NoError(t, os.WriteFile(badModulePath, []byte(badModuleContent), 0644))
+
+	// Create main script that requires the bad module
+	mainScriptPath := filepath.Join(tmpDir, "main.lua")
+	require.NoError(t, os.WriteFile(mainScriptPath, []byte(""), 0644))
+
+	engine := NewLuaEngine(logger)
+	defer engine.Close()
+
+	// Configure paths so require can find the bad module
+	require.NoError(t, engine.SetPackagePaths(mainScriptPath, nil))
+
+	// Execute script that requires the bad module
+	script := `local mod = require('bad_module')`
+	err := engine.ExecuteScript(t.Context(), script)
+
+	// MUST return error containing syntax error information
+	require.Error(t, err, "require of module with syntax error MUST fail")
+	assert.Contains(t, err.Error(), "syntax error", "error MUST mention syntax error")
+}
+
+func TestSecureModuleLoader_RuntimeErrorInModule(t *testing.T) {
+	// GOAL: Verify runtime errors in required modules propagate to caller
+	//
+	// TEST SCENARIO: Require module with runtime error → error returned → contains error message
+
+	logger := logrus.New()
+	logger.SetLevel(logrus.DebugLevel)
+
+	tmpDir := t.TempDir()
+
+	// Create a module that has valid syntax but throws runtime error
+	badModulePath := filepath.Join(tmpDir, "runtime_error_module.lua")
+	badModuleContent := `error("intentional runtime error in module")`
+	require.NoError(t, os.WriteFile(badModulePath, []byte(badModuleContent), 0644))
+
+	// Create main script
+	mainScriptPath := filepath.Join(tmpDir, "main.lua")
+	require.NoError(t, os.WriteFile(mainScriptPath, []byte(""), 0644))
+
+	engine := NewLuaEngine(logger)
+	defer engine.Close()
+
+	require.NoError(t, engine.SetPackagePaths(mainScriptPath, nil))
+
+	script := `local mod = require('runtime_error_module')`
+	err := engine.ExecuteScript(t.Context(), script)
+
+	require.Error(t, err, "require of module with runtime error MUST fail")
+	assert.Contains(t, err.Error(), "intentional runtime error", "error MUST contain the error message")
+}
