@@ -152,7 +152,8 @@ The binary will be available at `./blim`.
 Run the test suite:
 
 ```bash
-make test
+# go clean -testcache
+make test-race 2>&1 | grep -E "^(FAIL\t|ok\t|--- FAIL)" | head -30
 ```
 
 Run tests with coverage:

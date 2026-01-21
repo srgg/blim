@@ -273,7 +273,7 @@ type SubscriptionDiagnostics struct {
 	// Lifecycle tracking
 	CancelReason CancelReason // How subscription was cancelled
 	CancelledAt  time.Time    // When cancel was called
-	CleanedUp    bool         // runSubscription exited cleanly
+	cleanedUp    atomic.Bool  // runSubscription exited cleanly (atomic for race-safe test reads)
 	CleanedUpAt  time.Time    // When cleanup completed
 
 	// Captured before cancel (set by wrapped cancel)
@@ -337,13 +337,21 @@ func (d *SubscriptionDiagnostics) MarkImplicitCancel() {
 // MarkCleanedUp records that runSubscription exited cleanly and verifies cleanup for explicit cancel.
 func (d *SubscriptionDiagnostics) MarkCleanedUp() {
 	if d != nil {
-		d.CleanedUp = true
+		d.cleanedUp.Store(true)
 		d.CleanedUpAt = time.Now()
 
 		if d.CancelReason == CancelReasonExplicit {
 			d.verifyExplicitCancel()
 		}
 	}
+}
+
+// CleanedUp returns whether runSubscription exited cleanly. Thread-safe.
+func (d *SubscriptionDiagnostics) CleanedUp() bool {
+	if d == nil {
+		return false
+	}
+	return d.cleanedUp.Load()
 }
 
 // verifyExplicitCancel runs cleanup verification for explicit cancel.
@@ -510,7 +518,7 @@ func (cd *ConnectionDiagnostics) VerifyDisconnectCleanup() CleanupErrors {
 		}
 
 		// Every subscription must have cleaned up
-		if !sub.Diag.CleanedUp {
+		if !sub.Diag.CleanedUp() {
 			errors = append(errors, CleanupError{
 				Check:   "subscription_cleanup",
 				Message: fmt.Sprintf("subscription %q did not clean up", sub.Name),
@@ -629,7 +637,7 @@ func buildDiagnosticDump(connDiag *ConnectionDiagnostics, errors CleanupErrors, 
 				if !d.CancelledAt.IsZero() {
 					dump.WriteString(fmt.Sprintf("    CancelledAt: %s\n", d.CancelledAt.Format("15:04:05.000")))
 				}
-				dump.WriteString(fmt.Sprintf("    CleanedUp: %v\n", d.CleanedUp))
+				dump.WriteString(fmt.Sprintf("    CleanedUp: %v\n", d.CleanedUp()))
 				if !d.CleanedUpAt.IsZero() {
 					dump.WriteString(fmt.Sprintf("    CleanedUpAt: %s\n", d.CleanedUpAt.Format("15:04:05.000")))
 				}

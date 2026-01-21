@@ -13,6 +13,7 @@ import (
 	"github.com/srg/blim/bridge"
 	"github.com/srg/blim/internal/device"
 	"github.com/srg/blim/internal/lua"
+	"github.com/srg/blim/internal/ptyio"
 )
 
 // bridgeCmd represents the bridge command
@@ -89,9 +90,32 @@ func runBridge(cmd *cobra.Command, args []string) error {
 	// Handle interrupts gracefully
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+
+	// Set up stdin relay for clean shutdown of Lua scripts using blocking reads
+	stdinRelay, err := ptyio.NewPTYRelay(logger)
+	if err != nil {
+		return err
+	}
+
+	exitProgress := NewProgressPrinter("Shutting down", "Cleaning up", "Done")
+	defer func() {
+		exitProgress.Stop()
+		stdinRelay.Cleanup()
+	}()
+
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				logger.Errorf("Panic in signal handler: %v", r)
+				cancel() // Ensure shutdown proceeds even after panic
+			}
+		}()
 		<-sigChan
+		exitProgress.Start()
+		exitProgress.Callback()("Closing connections")
 		logger.Info("Received interrupt signal, shutting down...")
+		_ = stdinRelay.Close()
+		exitProgress.Callback()("Stopping script")
 		cancel()
 	}()
 

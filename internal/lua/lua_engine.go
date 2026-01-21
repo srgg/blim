@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"time"
 
 	_ "embed"
@@ -13,6 +14,7 @@ import (
 	"github.com/aarzilli/golua/lua"
 	"github.com/sirupsen/logrus"
 	"github.com/srg/blim/internal/groutine"
+	orderedmap "github.com/wk8/go-ordered-map/v2"
 )
 
 //go:embed lua-libs/json.lua
@@ -78,6 +80,22 @@ func (e *LuaError) Is(target error) bool {
 	return false
 }
 
+// shutdownHookKey is the context key for passing shutdown hooks to LuaEngine.
+type shutdownHookKey struct{}
+
+// ShutdownHook is a function that returns true if shutdown is in progress.
+// When set via WithShutdownHook, LuaEngine checks this before context cancellation
+// in the VM instruction hook, allowing graceful shutdown without raising errors.
+// The hook receives the Lua state for potential state inspection during shutdown.
+type ShutdownHook func(L *lua.State) bool
+
+// WithShutdownHook returns a context with the given shutdown hook attached.
+// The hook is checked every 200 VM instructions during script execution.
+// If the hook returns true, the instruction hook returns early without error.
+func WithShutdownHook(ctx context.Context, hook ShutdownHook) context.Context {
+	return context.WithValue(ctx, shutdownHookKey{}, hook)
+}
+
 // FairLock is a channel-based lock with FIFO fairness guarantees.
 // Unlike sync.Mutex, blocked goroutines are served in order they called Lock().
 // This prevents starvation when multiple goroutines compete for the lock.
@@ -109,6 +127,18 @@ type LuaEngine struct {
 	scriptCode   string
 	outputChan   *RingChannel[LuaOutputRecord] // ring buffer for Lua outputs
 	secureLoader *SecureModuleLoader           // Singleton: manages allowed paths for require()
+
+	// scriptExecutionCtx is the context for the currently executing script.
+	// Set at the start of safeExecuteScript, used by context-aware functions like blim.sleep().
+	// Enables cancellation of blocking Go operations when the execution context is canceled.
+	scriptExecutionCtx context.Context
+
+	// Shutdown callbacks - invoked IN REGISTRATION ORDER when context is canceled,
+	// before waiting for script goroutine. Uses an ordered map to guarantee FIFO execution.
+	// Used by bridge to: 1) cancel subscriptions, 2) wait for callbacks, 3) close PTY.
+	shutdownCallbacks   *orderedmap.OrderedMap[int, func()]
+	shutdownCallbacksMu sync.Mutex
+	nextShutdownID      int
 }
 
 // NewLuaEngine creates a new Lua engine with full stdout/stderr capture using the default channel capacity
@@ -175,6 +205,49 @@ func (e *LuaEngine) doWithStateInternal(callback func(*lua.State) interface{}) i
 		return nil
 	}
 	return callback(e.state)
+}
+
+// AddShutdownHook registers a callback to be invoked when the context is canceled,
+// before waiting for the script goroutine to finish. Returns a function to
+// remove the hook. Hooks are invoked in registration order (FIFO).
+// Used by bridge to: 1) cancel subscriptions, 2) wait for callbacks, 3) close PTY.
+func (e *LuaEngine) AddShutdownHook(fn func()) (remove func()) {
+	e.shutdownCallbacksMu.Lock()
+	defer e.shutdownCallbacksMu.Unlock()
+
+	if e.shutdownCallbacks == nil {
+		e.shutdownCallbacks = orderedmap.New[int, func()]()
+	}
+
+	id := e.nextShutdownID
+	e.nextShutdownID++
+	e.shutdownCallbacks.Set(id, fn)
+
+	return func() {
+		e.shutdownCallbacksMu.Lock()
+		defer e.shutdownCallbacksMu.Unlock()
+		e.shutdownCallbacks.Delete(id)
+	}
+}
+
+// invokeShutdownHooks calls all registered shutdown hooks in registration order (FIFO).
+// Called when context is canceled, before waiting for the script goroutine.
+func (e *LuaEngine) invokeShutdownHooks() {
+	e.shutdownCallbacksMu.Lock()
+	if e.shutdownCallbacks == nil {
+		e.shutdownCallbacksMu.Unlock()
+		return
+	}
+	// Collect callbacks in registration order
+	callbacks := make([]func(), 0)
+	for pair := e.shutdownCallbacks.Oldest(); pair != nil; pair = pair.Next() {
+		callbacks = append(callbacks, pair.Value)
+	}
+	e.shutdownCallbacksMu.Unlock()
+
+	for _, fn := range callbacks {
+		fn()
+	}
 }
 
 func (e *LuaEngine) registerBlockedLuaFunctions() {
@@ -380,7 +453,7 @@ func (e *LuaEngine) registerIOWriteCaptureInternal() {
 	})
 }
 
-// PreloadLuaLibrary loads a Lua library script into package.loaded[libraryName]
+// PreloadLuaLibrary loads a Lua library script into a package.loaded[libraryName]
 // This generic function follows the RegisterLibrary pattern and avoids package.preload callback issues.
 func (e *LuaEngine) PreloadLuaLibrary(libraryCode, libraryName, errorContext string) {
 	e.doWithStateInternal(func(L *lua.State) interface{} {
@@ -512,6 +585,11 @@ func (e *LuaEngine) safeExecuteScript(ctx context.Context, script string) error 
 
 	done := make(chan error, 1)
 
+	// Fail fast if context already set - indicates nested/concurrent execution bug
+	if e.scriptExecutionCtx != nil {
+		return fmt.Errorf("scriptExecutionCtx already set: nested or concurrent script execution not supported")
+	}
+
 	name := fmt.Sprintf("lua-script-executor-%d", len(script))
 	groutine.Go(ctx, name, func(ctx context.Context) {
 		defer func() {
@@ -521,29 +599,48 @@ func (e *LuaEngine) safeExecuteScript(ctx context.Context, script string) error 
 					Timestamp: time.Now(),
 					Source:    "stderr",
 				})
+				e.scriptExecutionCtx = nil // Clear before signaling completion
 				done <- fmt.Errorf("panic during lua execution: %v", r)
 			}
 		}()
 
+		// Store context for use by context-aware functions (e.g., blim.sleep)
+		e.scriptExecutionCtx = ctx
+
 		var execErr error
 		e.DoWithState(func(L *lua.State) interface{} {
-			// Hook for cooperative cancellation
+			// Hook for cooperative cancellation - fires every 200 VM instructions.
+			// Check shutdown hook first (if provided via context) to allow graceful
+			// shutdown without raising errors - the hook returns early silently.
+			shutdownHook, _ := ctx.Value(shutdownHookKey{}).(ShutdownHook)
 			L.SetHook(func(L *lua.State) {
+				// Shutdown hook check first - allows graceful exit without error
+				if shutdownHook != nil && shutdownHook(L) {
+					e.logger.Debug("[LuaHook] context provided shutdown hook triggered, skipping")
+					return
+				}
 				select {
 				case <-ctx.Done():
+					e.logger.Debug("[LuaHook] context done, raising cancellation error")
 					L.RaiseError("script execution cancelled")
 				default:
+					e.logger.Debug("[LuaHook] tick (context still active)")
 				}
 			}, 200)
 
-			if err := L.DoString(script); err != nil {
-				// Check if cancellation
+			defer L.SetHook(nil, 0)
+
+			e.logger.Debug("[safeExecuteScript] starting L.DoString (Lua script execution)...")
+			err := L.DoString(script)
+			e.logger.Debug("[safeExecuteScript] L.DoString returned (Lua script completed)")
+			if err != nil {
+				// Check if cancellation - stay silent, let the caller handle messaging
 				if ctx.Err() != nil || strings.Contains(err.Error(), "cancelled") {
-					e.outputChan.ForceSend(LuaOutputRecord{
-						Content:   "Lua execution cancelled",
-						Timestamp: time.Now(),
-						Source:    "stderr",
-					})
+					// e.outputChan.ForceSend(LuaOutputRecord{
+					// 	Content:   "Lua execution cancelled",
+					// 	Timestamp: time.Now(),
+					// 	Source:    "stderr",
+					// })
 					execErr = context.Canceled
 					return nil
 				}
@@ -559,13 +656,25 @@ func (e *LuaEngine) safeExecuteScript(ctx context.Context, script string) error 
 			}
 			return nil
 		})
+		e.scriptExecutionCtx = nil // Clear before signaling completion to avoid race
 		done <- execErr
 	})
 
 	select {
 	case err := <-done:
+		e.logger.Debug("[safeExecuteScript] goroutine finished normally")
 		return err
 	case <-ctx.Done():
+		// Invoke shutdown hooks first to unblock any blocking operations (e.g., close PTY to unblock io.read())
+		e.logger.Debug("[safeExecuteScript] context cancelled, invoking shutdown hooks...")
+		e.invokeShutdownHooks()
+
+		// Wait for the script execution goroutine (L.DoString) to finish before returning.
+		// The debug hook will raise an error causing L.DoString to return,
+		// ensuring the goroutine exits cleanly before we proceed with shutdown.
+		e.logger.Debug("[safeExecuteScript] waiting for goroutine...")
+		<-done
+		e.logger.Debug("[safeExecuteScript] goroutine finished after cancellation")
 		return context.Canceled
 	}
 }
@@ -631,6 +740,7 @@ func (e *LuaEngine) resetInternal() {
 
 	e.registerPrintCaptureInternal()
 	e.registerIOWriteCaptureInternal()
+	//e.registerIOReadContextAwareInternal()
 	e.preloadJSONLibInternal()
 	e.registerBlockedLuaFunctions()
 
@@ -649,11 +759,35 @@ func (e *LuaEngine) Reset() {
 
 // Close cleans up the engine
 func (e *LuaEngine) Close() {
+	e.logger.Debug("[LuaEngine.Close] acquiring mutex...")
 	e.stateMutex.Lock()
+	e.logger.Debug("[LuaEngine.Close] mutex acquired")
 	defer e.stateMutex.Unlock()
 
 	if e.state != nil {
+		// Clear the debug hook before closing - the hook closure may reference
+		// an invalid context after cancellation. Use no-op function (not nil)
+		// as golua may not handle nil safely.
+		e.logger.Debug("[LuaEngine.Close] clearing debug hook...")
+		e.state.SetHook(func(*lua.State) {}, 0)
+
+		// TEMPORARILY DISABLED: GC calls moved crash earlier, suggesting corruption happens before close
+		// // Run full GC cycle while state is still valid. This ensures all __gc
+		// // finalizers (for Go functions registered via PushGoFunction) run while
+		// // the Lua registry is intact. Without this, lua_close() runs finalizers
+		// // during teardown, when the registry is partially destroyed, causing
+		// // gchook_wrapper to crash when accessing LUA_REGISTRYINDEX.
+		// e.logger.Debug("[LuaEngine.Close] running full GC cycle...")
+		// e.state.GC(lua.LUA_GCCOLLECT, 0)
+
+		// // Stop GC so no finalizers run during lua_close() teardown
+		// e.logger.Debug("[LuaEngine.Close] stopping GC...")
+		// e.state.GC(lua.LUA_GCSTOP, 0)
+
+		e.logger.Debugf("[LuaEngine.Close] goroutine dump before lua_close:\n%s", groutine.Dump())
+		e.logger.Debug("[LuaEngine.Close] calling state.Close()...")
 		e.state.Close()
+		e.logger.Debug("[LuaEngine.Close] state closed")
 		e.state = nil
 	}
 }

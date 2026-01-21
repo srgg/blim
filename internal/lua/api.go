@@ -8,6 +8,7 @@ import (
 	"runtime/debug"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -54,6 +55,10 @@ type LuaAPIInterface interface {
 	SetCharacteristicWriteTimeout(d time.Duration)
 	SetPackagePaths(scriptPath string, libPaths []string) error
 
+	// AddShutdownHook registers a callback invoked when script execution context is cancelled.
+	// Returns a function to remove the hook. Used to unblock io.read() by closing PTY.
+	AddShutdownHook(fn func()) (remove func())
+
 	Close()
 }
 
@@ -79,6 +84,9 @@ type LuaAPI struct {
 	ptyCallbackRef             int              // Tracks PTY callback ref for cleanup; lua.LUA_NOREF if none
 	subscriptionCallbackRefs   map[int]struct{} // Tracks subscription callback refs for cleanup (O(1) add/remove)
 	callbackRefsMu             sync.Mutex       // Protects subscriptionCallbackRefs map
+	luaCallbackWG              sync.WaitGroup   // Tracks in-flight async callbacks for safe shutdown
+	shuttingDown               atomic.Bool      // Set during shutdown to block new callbacks before Wait()
+	inCallbackCount            atomic.Int32     // Count of active L.Call() in callbacks; >0 means unsafe to RaiseError
 }
 
 // NewBLEAPI2 creates a new BLE API instance with subscription support
@@ -104,6 +112,12 @@ func (api *LuaAPI) GetDevice() device.Device {
 // SetBridge sets the bridge information and updates the PTY strategy.
 // When a bridge is set, the ptyio field is updated to use the bridge's PTY I/O strategy.
 // When the bridge is nil, the ptyio field reverts to NilPTYIO.
+//
+// NOTE: We intentionally do NOT register a shutdown hook here to call Disconnect().
+// The shutdown hook runs BEFORE the script goroutine exits (see safeExecuteScript),
+// and calling Disconnect() while the script is still running causes SIGBUS crashes.
+// Disconnect() and WaitForCallbacks() are handled properly in LuaAPI.Close() which
+// runs AFTER the script goroutine has fully exited.
 func (api *LuaAPI) SetBridge(bridge BridgeInfo) {
 	api.logger.WithFields(logrus.Fields{
 		"bridge_set": bridge != nil,
@@ -128,6 +142,12 @@ func (api *LuaAPI) SetPackagePaths(scriptPath string, libPaths []string) error {
 	return api.LuaEngine.SetPackagePaths(scriptPath, libPaths)
 }
 
+// AddShutdownHook registers a callback invoked when script execution context is cancelled.
+// Returns a function to remove the hook. Used to unblock io.read() by closing PTY.
+func (api *LuaAPI) AddShutdownHook(fn func()) (remove func()) {
+	return api.LuaEngine.AddShutdownHook(fn)
+}
+
 // releasePTYCallbackRef releases the PTY callback reference from Lua registry if one exists.
 // Must be called within DoWithState or when L is already available.
 func (api *LuaAPI) releasePTYCallbackRef(L *lua.State) {
@@ -141,11 +161,23 @@ func (api *LuaAPI) releasePTYCallbackRef(L *lua.State) {
 // Called from Lua context - uses doWithStateInternal (no lock acquisition).
 func (api *LuaAPI) releaseCallbackRefInternal(ref int) {
 	api.callbackRefsMu.Lock()
+	_, exists := api.subscriptionCallbackRefs[ref]
 	delete(api.subscriptionCallbackRefs, ref)
+	remaining := len(api.subscriptionCallbackRefs)
 	api.callbackRefsMu.Unlock()
 
+	if api.logger != nil {
+		api.logger.Debugf("subscription:release ref=%d existed=%v (remaining=%d)", ref, exists, remaining)
+	}
+
 	api.LuaEngine.doWithStateInternal(func(L *lua.State) interface{} {
-		L.Unref(lua.LUA_REGISTRYINDEX, ref)
+		if api.logger != nil {
+			api.logger.Debugf("subscription:unref ref=%d", ref)
+		}
+
+		if ref != lua.LUA_NOREF {
+			L.Unref(lua.LUA_REGISTRYINDEX, ref)
+		}
 		return nil
 	})
 }
@@ -377,7 +409,42 @@ func parseStreamPattern(pattern string) device.StreamMode {
 }
 
 func (api *LuaAPI) ExecuteScript(ctx context.Context, script string) error {
-	return api.LuaEngine.ExecuteScript(ctx, script)
+	// Shutdown hook: detects context cancellation and sets the shuttingDown flag.
+	// Returns true to skip RaiseError only when inside a callback (prevents SIGSEGV).
+	// Returns false when outside a callback to allow RaiseError to stop the script.
+	hook := func(_ *lua.State) bool {
+		inCallback := api.inCallbackCount.Load() > 0
+
+		// Already shutting down - check if safe to RaiseError
+		if api.shuttingDown.Load() {
+			if inCallback {
+				api.logger.Debug("[LuaAPI:ShutdownHook] shuttingDown=true, inCallback=true, skipping RaiseError (unsafe)")
+				return true // Skip RaiseError - we're in a callback, unsafe
+			}
+			api.logger.Debug("[LuaAPI:ShutdownHook] shuttingDown=true, inCallback=false, allowing RaiseError")
+			return false // Allow RaiseError - not in callback, safe to stop
+		}
+
+		// Check if context is done
+		select {
+		case <-ctx.Done():
+			// First tick to see shutdown - set flag atomically
+			api.shuttingDown.Store(true)
+			api.logger.Debugf("[LuaAPI:ShutdownHook] ctx.Done detected, set shuttingDown=true, inCallback=%v", inCallback)
+			if inCallback {
+				api.logger.Debug("[LuaAPI:ShutdownHook] in callback, skipping RaiseError (unsafe)")
+				return true // Skip - let callback finish first
+			}
+			api.logger.Debug("[LuaAPI:ShutdownHook] not in callback, allowing RaiseError")
+			return false // Safe to stop immediately
+		default:
+			// Normal operation - let safeExecuteScript's default hook run
+			return false
+		}
+	}
+
+	hookedUp := WithShutdownHook(ctx, hook)
+	return api.LuaEngine.ExecuteScript(hookedUp, script)
 }
 
 func (api *LuaAPI) LoadScriptFile(filename string) error {
@@ -812,8 +879,9 @@ func (api *LuaAPI) executeSubscription(config *LuaSubscriptionTable) (func(), er
 	// Capture callback ref for use in callback and cancel closures
 	callbackRef := config.CallbackRef
 
-	// Variable to hold the wrapped cancel function; set after Subscribe returns.
-	// Callback closure captures this pointer to enable self-cancellation.
+	// cancelMu protects access to cancel function. The callback closure may be invoked
+	// by Subscribe's goroutine before we set cancel below, so we need synchronization.
+	var cancelMu sync.RWMutex
 	var cancel func()
 
 	// Create a callback that calls the Lua function (nil if no callback provided)
@@ -822,22 +890,26 @@ func (api *LuaAPI) executeSubscription(config *LuaSubscriptionTable) (func(), er
 		// Track ref for cleanup in Close()
 		api.callbackRefsMu.Lock()
 		api.subscriptionCallbackRefs[callbackRef] = struct{}{}
+		if api.logger != nil {
+			api.logger.Debugf("subscription:create ref=%d (total tracked=%d)", callbackRef, len(api.subscriptionCallbackRefs))
+		}
 		api.callbackRefsMu.Unlock()
 
 		callback = func(record *device.Record) {
-			// Pass cancel function to Lua callback for self-cancellation
-			api.callLuaCallback(callbackRef, record, cancel)
+			// Read cancel safely - may be nil if called before Subscribe returns
+			cancelMu.RLock()
+			cancelFn := cancel
+			cancelMu.RUnlock()
+			api.callLuaCallback(callbackRef, record, cancelFn)
 		}
 	}
 
 	// Call Subscribe on the connection
 	rawCancel, err := api.device.GetConnection().Subscribe(opts, pattern, maxRate, drainDuration, callback)
 	if err != nil {
-		// Clean up tracked ref on subscribe failure
+		// Clean up tracked ref on subscribe failure - use single source of truth
 		if callbackRef != lua.LUA_NOREF {
-			api.callbackRefsMu.Lock()
-			delete(api.subscriptionCallbackRefs, callbackRef)
-			api.callbackRefsMu.Unlock()
+			api.releaseCallbackRefInternal(callbackRef)
 		}
 		return nil, err
 	}
@@ -845,8 +917,11 @@ func (api *LuaAPI) executeSubscription(config *LuaSubscriptionTable) (func(), er
 	// Wrap rawCancel to also release the Lua callback reference (idempotent).
 	// Uses releaseCallbackRefInternal since cancel is always called from Lua context.
 	var cancelOnce sync.Once
-	cancel = func() {
+	wrappedCancel := func() {
 		cancelOnce.Do(func() {
+			if api.logger != nil {
+				api.logger.Debugf("subscription:cancel invoked for ref=%d", callbackRef)
+			}
 			rawCancel()
 			if callbackRef != lua.LUA_NOREF {
 				api.releaseCallbackRefInternal(callbackRef)
@@ -854,11 +929,25 @@ func (api *LuaAPI) executeSubscription(config *LuaSubscriptionTable) (func(), er
 		})
 	}
 
-	return cancel, nil
+	// Set cancel with synchronization - callbacks may already be running
+	cancelMu.Lock()
+	cancel = wrappedCancel
+	cancelMu.Unlock()
+
+	return wrappedCancel, nil
 }
 
 // callPTYDataCallback calls the Lua callback function when PTY data arrives
 func (api *LuaAPI) callPTYDataCallback(callbackRef int, data []byte) error {
+	// Check shuttingDown BEFORE Add() to prevent new callbacks during shutdown.
+	if api.shuttingDown.Load() {
+		api.logger.Debugf("pty:lua-callback skipped ref=%d reason=shutting_down", callbackRef)
+		return nil
+	}
+
+	api.luaCallbackWG.Add(1)
+	defer api.luaCallbackWG.Done()
+
 	if callbackRef == lua.LUA_NOREF {
 		return nil
 	}
@@ -904,6 +993,11 @@ func (api *LuaAPI) callPTYDataCallback(callbackRef int, data []byte) error {
 			}
 		}()
 
+		// Save stack position before pushing callback items.
+		// On error, we restore to this position (not 0) to preserve any stack frames
+		// from the main script when callbacks run during blim.sleep().
+		stackTop := L.GetTop()
+
 		// Push the callback function onto the stack using reference
 		L.RawGeti(lua.LUA_REGISTRYINDEX, callbackRef)
 
@@ -912,7 +1006,11 @@ func (api *LuaAPI) callPTYDataCallback(callbackRef int, data []byte) error {
 
 		// Call the function with one argument (the data string)
 		// This can panic if StackTrace() crashes while building LuaError
-		if err := L.Call(1, 0); err != nil {
+		// Track callback depth to prevent RaiseError during L.Call (causes SIGSEGV)
+		api.inCallbackCount.Add(1)
+		err := L.Call(1, 0)
+		api.inCallbackCount.Add(-1)
+		if err != nil {
 			// Log the error for debugging
 			api.logger.Errorf("PTY Lua callback execution failed: %v", err)
 
@@ -923,10 +1021,11 @@ func (api *LuaAPI) callPTYDataCallback(callbackRef int, data []byte) error {
 				Source:    "stderr",
 			})
 
-			// CRITICAL: Reset the Lua stack after an error to prevent corruption
-			// When L.Call() fails, the stack may be left in an inconsistent state
-			// Resetting ensures the next callback starts with a clean stack
-			L.SetTop(0)
+			// Restore stack to pre-callback state to clean up callback items while
+			// preserving any stack frames from the main script (callbacks may run
+			// during blim.sleep). Using SetTop(0) would wipe the script's stack.
+			//L.SetTop(0)
+			L.SetTop(stackTop)
 		}
 
 		return nil
@@ -938,6 +1037,16 @@ func (api *LuaAPI) callPTYDataCallback(callbackRef int, data []byte) error {
 // callLuaCallback calls the Lua callback function with the record data and cancel function.
 // The cancel function is passed as the second argument to enable self-cancellation from Lua.
 func (api *LuaAPI) callLuaCallback(callbackRef int, record *device.Record, cancelFn func()) error {
+	// Check shuttingDown BEFORE Add() to prevent new callbacks during shutdown.
+	// This ensures luaCallbackWG.Wait() in Close() won't block on new callbacks.
+	if api.shuttingDown.Load() {
+		api.logger.Debugf("subscription:lua-callback skipped ref=%d reason=shutting_down", callbackRef)
+		return nil
+	}
+
+	api.luaCallbackWG.Add(1)
+	defer api.luaCallbackWG.Done()
+
 	api.logger.Debugf("[callLuaCallback] entry, callbackRef=%d", callbackRef)
 	if callbackRef == lua.LUA_NOREF {
 		api.logger.Debug("[callLuaCallback] LUA_NOREF, returning")
@@ -977,13 +1086,17 @@ func (api *LuaAPI) callLuaCallback(callbackRef int, record *device.Record, cance
 	}()
 
 	api.LuaEngine.DoWithState(func(L *lua.State) interface{} {
-		// Inner panic handler: catches panics from L.Call() (including StackTrace crashes)
 		defer func() {
 			if r := recover(); r != nil {
 				// Re-panic to outer handler for cleanup
 				panic(r)
 			}
 		}()
+
+		// Save stack position before pushing callback items.
+		// On error, we restore to this position (not 0) to preserve any stack frames
+		// from the main script when callbacks run during blim.sleep().
+		stackTop := L.GetTop()
 
 		// Push the callback function onto the stack using reference
 		L.RawGeti(lua.LUA_REGISTRYINDEX, callbackRef)
@@ -1053,7 +1166,11 @@ func (api *LuaAPI) callLuaCallback(callbackRef int, record *device.Record, cance
 
 		// Call the function with 2 arguments (record table, cancel function)
 		// This can panic if StackTrace() crashes while building LuaError
-		if err := L.Call(2, 0); err != nil {
+		// Track callback depth to prevent RaiseError during L.Call (causes SIGSEGV)
+		api.inCallbackCount.Add(1)
+		err := L.Call(2, 0)
+		api.inCallbackCount.Add(-1)
+		if err != nil {
 			// Log the error for debugging
 			api.logger.Errorf("Lua callback execution failed: %v", err)
 
@@ -1064,10 +1181,10 @@ func (api *LuaAPI) callLuaCallback(callbackRef int, record *device.Record, cance
 				Source:    "stderr",
 			})
 
-			// CRITICAL: Reset the Lua stack after an error to prevent corruption
-			// When L.Call() fails, the stack may be left in an inconsistent state
-			// Resetting ensures the next callback starts with a clean stack
-			L.SetTop(0)
+			// Restore stack to pre-callback state to clean up callback items while
+			// preserving any stack frames from the main script (callbacks may run
+			// during blim.sleep). Using SetTop(0) would wipe the script's stack.
+			L.SetTop(stackTop)
 		}
 
 		return nil
@@ -1295,6 +1412,7 @@ func (api *LuaAPI) registerCharacteristicFunction(L *lua.State) {
 // Sleeps for the specified number of milliseconds.
 // IMPORTANT: sleep releases the Lua state mutex during sleep to allow subscription
 // callbacks to execute. This enables polling loops to receive BLE notifications.
+// The sleep is context-aware and will return early if the execution context is cancelled.
 func (api *LuaAPI) registerSleepFunction(L *lua.State) {
 	api.SafePushGoFunction(L, "sleep", func(L *lua.State) int {
 		// Validate argument
@@ -1309,12 +1427,26 @@ func (api *LuaAPI) registerSleepFunction(L *lua.State) {
 			return 0
 		}
 
+		// Get execution context for cancellation support
+		ctx := api.LuaEngine.scriptExecutionCtx
+
 		// Release mutex to allow callbacks to execute during sleep
 		api.LuaEngine.stateMutex.Unlock()
 		defer api.LuaEngine.stateMutex.Lock()
 
-		// Sleep for the specified duration
-		time.Sleep(time.Duration(ms) * time.Millisecond)
+		// Context-aware sleep: returns early if context is cancelled
+		if ctx != nil {
+			select {
+			case <-time.After(time.Duration(ms) * time.Millisecond):
+				// Sleep completed normally
+			case <-ctx.Done():
+				// Context cancelled - will be handled by debug hook after mutex reacquired
+				api.logger.Debug("[blim.sleep] interrupted by context cancellation")
+			}
+		} else {
+			// Fallback to regular sleep if no context (shouldn't happen in normal usage)
+			time.Sleep(time.Duration(ms) * time.Millisecond)
+		}
 
 		return 0
 	})
@@ -1494,29 +1626,56 @@ func (api *LuaAPI) pushManufacturerParsedData(L *lua.State, parsedData interface
 }
 
 // Close cleans up the API resources. Idempotent and thread-safe.
+// Shutdown sequence ensures no race between BLE callbacks and Lua state destruction:
+// 1. Disconnect device first to stop new notifications/callbacks
+// 2. Wait for all in-flight callbacks to complete
+// 3. Clean up Lua registry refs (safe now, no callbacks accessing state)
+// 4. Close Lua engine
 func (api *LuaAPI) Close() {
 	api.closeOnce.Do(func() {
 		if api.logger != nil {
 			api.logger.WithField("lua_api_ptr", fmt.Sprintf("%p", api)).Debug("Closing lua api...")
 		}
 
-		// Clean up Lua registry references before closing LuaEngine
+		// 1. Set shuttingDown flag to block new callbacks from starting
+		api.shuttingDown.Store(true)
+
+		// 2. Disconnect device to stop new notifications/callbacks
+		api.device.Disconnect()
+
+		// 3. Wait for all in-flight callbacks to complete (they will finish naturally)
+		api.luaCallbackWG.Wait()
+
+		// 3. Now safe to clean up Lua registry refs
 		api.LuaEngine.DoWithState(func(L *lua.State) interface{} {
-			// Release PTY callback ref
 			api.releasePTYCallbackRef(L)
 
-			// Release subscription callback refs (map iteration)
+			// Collect refs to release (snapshot under lock)
 			api.callbackRefsMu.Lock()
+			refsToRelease := make([]int, 0, len(api.subscriptionCallbackRefs))
 			for ref := range api.subscriptionCallbackRefs {
-				L.Unref(lua.LUA_REGISTRYINDEX, ref)
+				refsToRelease = append(refsToRelease, ref)
 			}
-			api.subscriptionCallbackRefs = nil
 			api.callbackRefsMu.Unlock()
+
+			if api.logger != nil {
+				api.logger.Debugf("subscription:cleanup starting refs=%v", refsToRelease)
+			}
+
+			// Release each ref via releaseCallbackRefInternal()
+			for _, ref := range refsToRelease {
+				api.releaseCallbackRefInternal(ref)
+			}
+
+			if api.logger != nil {
+				api.logger.Debugf("subscription:cleanup complete")
+			}
+
 			return nil
 		})
 
+		// 4. Close Lua engine
 		api.LuaEngine.Close()
-		api.device.Disconnect()
 
 		if api.logger != nil {
 			api.logger.WithField("lua_api_ptr", fmt.Sprintf("%p", api)).Debug("Lua api closed")

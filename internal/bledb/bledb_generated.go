@@ -12,7 +12,7 @@ package bledb
 
 import "strings"
 
-const DataVersion = "2026-01-18T19:45:51Z"
+const DataVersion = "2026-01-21T12:22:14Z"
 
 var (
 	serviceMap        = map[string]string{

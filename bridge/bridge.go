@@ -147,14 +147,16 @@ func RunDeviceBridge[R any](
 
 		// Close PTY I/O strategy (stops background monitoring and closes master/slave)
 		if pty != nil {
-			_ = pty.Close()
-			logger.Infof("Closed PTY: %s", pty.TTYName())
+			if err := pty.Close(); err != nil {
+				logger.WithError(err).Warnf("Failed to close PTY: %s", pty.TTYName())
+			} else {
+				logger.Infof("Closed PTY: %s", pty.TTYName())
+			}
 		}
 
 		if luaApi != nil {
-			if luaApi.GetDevice() != nil && luaApi.GetDevice().IsConnected() {
-				_ = luaApi.GetDevice().Disconnect()
-			}
+			// Disconnect is now handled by Close() which disconnects first,
+			// then waits for in-flight callbacks before closing Lua state
 			luaApi.Close()
 		}
 	}()
@@ -201,7 +203,7 @@ func RunDeviceBridge[R any](
 	// Create PTY I/O strategy with background slave monitoring
 	pty, err = factory.CreatePTY(inputBufferSize, outputBufferSize, logger)
 	if err != nil {
-		return zero, err
+		return zero, fmt.Errorf("failed to create PTY: %w", err)
 	}
 
 	logger.Infof("Created PTY: %s", pty.TTYName())
@@ -243,7 +245,7 @@ type CLIBridgeConfig struct {
 	ScriptOpts    *lua.ScriptOptions
 	Stdout        io.Writer // nil = discard
 	Stderr        io.Writer // nil = discard
-	ServiceUUID   string    // "BLE service UUID to bridge
+	ServiceUUID   string    // BLE service UUID to bridge
 
 	CharacteristicReadTimeout  time.Duration // Timeout for characteristic read operations
 	CharacteristicWriteTimeout time.Duration // Timeout for characteristic write operations
@@ -324,6 +326,15 @@ func RunCliBridge(ctx context.Context, progressCallback ProgressCallback, opts C
 			// Context canceled without cause (normal shutdown)
 			return nil, nil
 		case <-ctx.Done():
+			// Before returning, check if connection was also lost.
+			// When both channels are ready, Go's select picks randomly -
+			// we must check connCtx to avoid swallowing disconnect errors.
+			if connCtx.Err() != nil {
+				cause := context.Cause(connCtx)
+				if cause != nil && errors.Is(cause, device.ErrNotConnected) {
+					return nil, device.ErrConnectionLost
+				}
+			}
 			opts.Logger.Info("Bridge shutting down...")
 			return nil, nil
 		}

@@ -4,6 +4,7 @@ package bridge
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"sync"
 	"time"
@@ -400,6 +401,11 @@ func (lc *BridgeLifecycle) StartWithCallback(
 	go func() {
 		defer lc.wg.Done()
 		defer lc.readyOnce.Do(func() { close(lc.ready) })
+		defer func() {
+			if r := recover(); r != nil {
+				lc.err = fmt.Errorf("panic in StartWithCallback: %v", r)
+			}
+		}()
 
 		opts := &BridgeOptions{
 			BleAddress: bleAddress,
@@ -503,6 +509,11 @@ func (lc *BridgeLifecycle) StartCLI(ctx context.Context, opts *CLILifecycleOptio
 	go func() {
 		defer lc.wg.Done()
 		defer lc.readyOnce.Do(func() { close(lc.ready) })
+		defer func() {
+			if r := recover(); r != nil {
+				lc.err = fmt.Errorf("panic in StartCLI: %v", r)
+			}
+		}()
 
 		// Cleanup when bridge completes
 		defer func() {

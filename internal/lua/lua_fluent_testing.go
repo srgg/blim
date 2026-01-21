@@ -377,7 +377,11 @@ func (f *GenericLuaFluentTest[Self]) ExecuteScript(script string) Self {
 
 // SetScriptExecutionContext sets up the script execution context for ConsumeStdout/ConsumeLuaError.
 // Used by MustBridgeRun which runs scripts via RunCliBridge instead of ExecuteScript.
+// Thread-safe: protected by currentMu.
 func (f *GenericLuaFluentTest[Self]) SetScriptExecutionContext(script string, collector *LuaOutputCollector) {
+	f.currentMu.Lock()
+	defer f.currentMu.Unlock()
+
 	f.current = &ScriptExecutionContext{
 		script:    script,
 		collector: collector,
@@ -402,6 +406,7 @@ func (f *GenericLuaFluentTest[Self]) SetScriptExecutionError(err error) {
 // ExecuteScriptWithCollector executes a script using an existing collector.
 // Used when output is already being routed to the collector (e.g., via a drainer in bridge mode).
 // Unlike ExecuteScript, this does NOT create a new collector - it reuses the provided one.
+// Thread-safe: protected by currentMu for accessing current.
 func (f *GenericLuaFluentTest[Self]) ExecuteScriptWithCollector(ctx context.Context, script string, collector *LuaOutputCollector) Self {
 	// Fail if previous context has unconsumed data
 	f.CheckUnconsumedData("ExecuteScriptWithCollector called with unhandled previous execution")
@@ -413,14 +418,21 @@ func (f *GenericLuaFluentTest[Self]) ExecuteScriptWithCollector(ctx context.Cont
 	// Resolve script content (ignore args - bridge scripts are inline)
 	scriptContent, _ := f.resolveScript(script)
 
-	// Set up context with the provided collector
+	// Set up context with the provided collector (protected by mutex)
+	f.currentMu.Lock()
 	f.current = &ScriptExecutionContext{
 		script:    scriptContent,
 		collector: collector,
 	}
+	f.currentMu.Unlock()
 
 	// Execute via LuaAPI directly (output flows through existing drainer → collector)
-	f.current.executionErr = f.luaApi.ExecuteScript(ctx, scriptContent)
+	err := f.luaApi.ExecuteScript(ctx, scriptContent)
+
+	// Store execution error (protected by mutex)
+	f.currentMu.Lock()
+	f.current.executionErr = err
+	f.currentMu.Unlock()
 
 	return f.selfRef
 }

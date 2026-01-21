@@ -108,7 +108,7 @@ func NewOutputDrainer(
 				logger.WithField("panic", r).Error("Output drainer: panic recovered")
 			}
 		}()
-		defer logger.Debugf("%s: exiting", groutine.GetName(ctx))
+		defer logger.Debugf("%s: exited", groutine.GetName(ctx))
 
 		for {
 			select {

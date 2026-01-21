@@ -10,7 +10,9 @@ import (
 	"time"
 
 	"github.com/srg/blim/internal/device"
+	"github.com/srg/blim/internal/devicefactory"
 	"github.com/srg/blim/internal/lua"
+	"github.com/srg/blim/internal/ptyio"
 	"github.com/srg/blim/internal/testutils"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
@@ -186,7 +188,7 @@ Bridge is running. Press Ctrl+C to stop the bridge.
 				emitter.
 					WithService("1234").
 					WithCharacteristic("5678", 0x48, 0x65, 0x6c, 0x6c, 0x6f, 0x20, 0x57, 0x6f, 0x72, 0x6c, 0x64, 0x21). // "Hello World!"
-					WithCharacteristic("90ab", 0x42, 0x3A, 0x7D, 0x8E).                                                 // ASCII-safe binary
+					WithCharacteristic("90ab", 0x42, 0x3A, 0x7D, 0x8E). // ASCII-safe binary
 					//
 					WithService("180f").
 					WithCharacteristic("2a19", 0x42).
@@ -197,7 +199,7 @@ Bridge is running. Press Ctrl+C to stop the bridge.
 			expectedRecords: func(b *lua.ExpectedRecordsBuilder) {
 				b.IgnoreFields("TsUs", "callNo", "Seq").
 					Record().Value("5678", 0x48, 0x65, 0x6c, 0x6c, 0x6f, 0x20, 0x57, 0x6f, 0x72, 0x6c, 0x64, 0x21). // "Hello World!"
-					Record().Value("90ab", 0x42, 0x3A, 0x7D, 0xEF, 0xBF, 0xBD).                                     // 0x8E becomes UTF-8 replacement char
+					Record().Value("90ab", 0x42, 0x3A, 0x7D, 0xEF, 0xBF, 0xBD). // 0x8E becomes UTF-8 replacement char
 					Record().Value("2a19", 0x42)
 			},
 		},
@@ -888,6 +890,143 @@ func (suite *BridgeTestSuite) TestRunCliBridgeIntegration() {
 			ConsumeStdout("started\n")
 	})
 
+	suite.Run("shuts down cleanly when script is sleeping", func() {
+		// GOAL: Verify bridge exits cleanly when a Lua script is blocked in blim.sleep() and context is cancelled
+		//
+		// TEST SCENARIO: Start bridge with a sleeping script → cancel context while sleeping → bridge exits within maxShutdownDuration
+		//
+		// This reproduces the real issue: Ctrl+C while the script is still executing
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		// Set up mock device via existing infrastructure
+		testDevice := suite.Connect("test-addr")
+		luaAPI := lua.NewBLEAPI2(testDevice.Device, suite.Logger)
+		defer luaAPI.Close()
+
+		// Create test factory that uses our mock LuaAPI
+		factory := &testBridgeFactory{
+			wrapper: &luaAPIWrapper{
+				LuaAPI: luaAPI,
+				logger: suite.Logger,
+			},
+			originalFactory: devicefactory.DefaultBridgeFactory,
+		}
+
+		// Track completion
+		bridgeDone := make(chan error, 1)
+
+		go func() {
+			err := RunCliBridge(ctx, nil, CLIBridgeConfig{
+				DeviceAddress: "test-addr",
+				// Script that sleeps for a long time - simulates blocking behavior
+				// Without proper shutdown handling, this would hang
+				ScriptContent: `
+					print("bridge started, sleeping...")
+					blim.sleep(60000)  -- 60 seconds - longer than test timeout
+					print("sleep completed")
+				`,
+				Logger:  suite.Logger,
+				Factory: factory,
+				Stdout:  os.Stdout,
+				Stderr:  os.Stderr,
+			})
+			bridgeDone <- err
+		}()
+
+		// Give script time to start and enter sleep
+		time.Sleep(200 * time.Millisecond)
+
+		// Cancel context (simulates Ctrl+C while script is sleeping)
+		cancel()
+
+		// Bridge MUST exit within maxShutdownDuration, not hang
+		select {
+		case err := <-bridgeDone:
+			// context.Canceled is expected on clean shutdown
+			if err != nil && err.Error() != "failed to execute script: context canceled" {
+				suite.NoError(err, "Bridge should exit cleanly or with context.Canceled")
+			}
+		case <-time.After(maxShutdownDuration):
+			suite.Fail("Bridge hung on shutdown - safeExecuteScript blocked waiting for goroutine")
+		}
+	})
+
+	suite.Run("shuts down cleanly when script is blocked on io.read", func() {
+		// GOAL: Verify bridge exits cleanly when the Lua script is blocked on io.read() and context is cancelled
+		//
+		// TEST SCENARIO: Start bridge with io.read() script → cancel context → call relay.Close() → bridge exits within maxShutdownDuration
+		//
+		// This tests the real mechanism used by the CLI: PTYRelay replaces fd 0 with a closeable
+		// pipe/PTY, and Close() sends EOF to unblock io.read().
+
+		// Create PTYRelay - replaces fd 0 with a closeable descriptor
+		// In tests, stdin is not a TTY so this uses a plain pipe internally
+		relay, err := ptyio.NewPTYRelay(suite.Logger)
+		suite.Require().NoError(err, "Failed to create PTYRelay")
+		defer relay.Cleanup()
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		// Set up mock device via existing infrastructure
+		testDevice := suite.Connect("test-addr")
+		luaAPI := lua.NewBLEAPI2(testDevice.Device, suite.Logger)
+		defer luaAPI.Close()
+
+		// Create test factory that uses our mock LuaAPI
+		factory := &testBridgeFactory{
+			wrapper: &luaAPIWrapper{
+				LuaAPI: luaAPI,
+				logger: suite.Logger,
+			},
+			originalFactory: devicefactory.DefaultBridgeFactory,
+		}
+
+		// Track completion
+		bridgeDone := make(chan error, 1)
+
+		go func() {
+			err := RunCliBridge(ctx, nil, CLIBridgeConfig{
+				DeviceAddress: "test-addr",
+				// Script that blocks on io.read() - simulates waiting for user input
+				// Without proper shutdown handling, this would hang until Ctrl+D
+				ScriptContent: `
+					print("waiting for input...")
+					local line = io.read("*l")
+					print("got: " .. tostring(line))
+				`,
+				Logger:  suite.Logger,
+				Factory: factory,
+				Stdout:  os.Stdout,
+				Stderr:  os.Stderr,
+			})
+			bridgeDone <- err
+		}()
+
+		// Give script time to start and block on io.read()
+		time.Sleep(200 * time.Millisecond)
+
+		// Cancel context AND close relay to unblock io.read()
+		// This tests the real mechanism used by the CLI signal handler
+		cancel()
+
+		// Unblock LUA io.read() by triggering EOF
+		_ = relay.Close()
+
+		// Bridge MUST exit within maxShutdownDuration, not hang waiting for input
+		select {
+		case err := <-bridgeDone:
+			// context.Canceled is expected on clean shutdown
+			if err != nil && err.Error() != "failed to execute script: context canceled" {
+				suite.NoError(err, "Bridge should exit cleanly or with context.Canceled")
+			}
+		case <-time.After(maxShutdownDuration):
+			suite.Fail("Bridge hung on shutdown - io.read() was not unblocked")
+		}
+	})
+
 	suite.Run("captures output after MustBridgeRun", func() {
 		// GOAL: Verify output from ExecuteScript is captured when called after MustBridgeRun
 		//
@@ -921,6 +1060,66 @@ func (suite *BridgeTestSuite) TestRunCliBridgeIntegration() {
 			FailBridgeRun("undefined_function", `undefined_function()`, nil)
 
 	})
+
+	suite.Run("returns ErrConnectionLost when BLE device disconnects during script execution", func() {
+		suite.T().Skip("TODO: Fix in next commit - disconnect detection during blocked script")
+
+		// GOAL: Verify bridge returns device.ErrConnectionLost when BLE device disconnects
+		//       while the Lua script is still running (blocked)
+		//
+		// TEST SCENARIO: Start bridge with BLOCKING script → simulate BLE disconnect → bridge exits with ErrConnectionLost
+		//
+		// This reproduces the real failure: script is blocked (e.g., on blim.sleep or waiting for BLE data),
+		// device disconnects, but the script doesn't know about it and keeps blocking.
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		testDevice := suite.Connect("test-addr")
+		luaAPI := lua.NewBLEAPI2(testDevice.Device, suite.Logger)
+		defer luaAPI.Close()
+
+		factory := &testBridgeFactory{
+			wrapper: &luaAPIWrapper{
+				LuaAPI: luaAPI,
+				logger: suite.Logger,
+			},
+			originalFactory: devicefactory.DefaultBridgeFactory,
+		}
+
+		bridgeDone := make(chan error, 1)
+		go func() {
+			err := RunCliBridge(ctx, nil, CLIBridgeConfig{
+				DeviceAddress: "test-addr",
+				// BLOCKING script - simulates real usage where script waits for BLE data
+				ScriptContent: `
+					print("bridge starting, sleeping for 10 seconds...")
+					blim.sleep(10000)
+					print("sleep completed")
+				`,
+				Logger:  suite.Logger,
+				Factory: factory,
+				Stdout:  os.Stdout,
+				Stderr:  os.Stderr,
+			})
+			bridgeDone <- err
+		}()
+
+		// Wait for script to start and enter blim.sleep()
+		time.Sleep(200 * time.Millisecond)
+
+		// Simulate BLE device disconnect WHILE script is blocked
+		testDevice.SimulateBluetoothDisconnect()
+
+		select {
+		case err := <-bridgeDone:
+			suite.Require().Error(err, "Bridge MUST return error on disconnect")
+			suite.Assert().ErrorIs(err, device.ErrConnectionLost,
+				"Bridge MUST return ErrConnectionLost, got: %v", err)
+		case <-time.After(2 * time.Second):
+			suite.Fail("Bridge hung - disconnect during script execution was not detected")
+		}
+	})
 }
 
 func (suite *BridgeTestSuite) TestPTYIntegration() {
@@ -938,7 +1137,7 @@ func (suite *BridgeTestSuite) TestPTYIntegration() {
 		defer cancel()
 
 		suite.ConnectWithContext(ctx, "test-addr").FluentBridgeTest().
-			// Start bridge with a boilerplate script, just to get bridge create PTYs
+			// Start bridge with a boilerplate script, just to get the bridge create PTYs
 			MustBridgeRun(`print("Bridge started")`, nil).
 			// Give it time to settle
 			Sleep(testSyncWait).
@@ -965,7 +1164,7 @@ func (suite *BridgeTestSuite) TestPTYIntegration() {
 	suite.Run("Lua writes to PTY without reading first", func() {
 		// GOAL: Verify Lua can write to PTY independently
 		//
-		// TEST SCENARIO: Lua writes "ping" via pty_write() → Test reads "ping" from PTY slave
+		// TEST SCENARIO: Lua writes "ping" via pty_write() → Test reads "ping" from a PTY slave
 
 		ctx, cancel := context.WithTimeout(context.Background(), 5*testSyncWait)
 		defer cancel()

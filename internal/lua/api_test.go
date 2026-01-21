@@ -3551,7 +3551,7 @@ func (suite *LuaApiTestSuite) TestSubscriptionCancellation() {
 
 		// Verify Go-level cancellation
 		suite.Equal(goble.CancelReasonExplicit, sub.Diag.CancelReason)
-		suite.True(sub.Diag.CleanedUp)
+		suite.True(sub.Diag.CleanedUp())
 
 		// Verify Lua callback ref released
 		api.callbackRefsMu.Lock()
@@ -3588,7 +3588,7 @@ func (suite *LuaApiTestSuite) TestSubscriptionCancellation() {
 		suite.Equal(1, len(bleConn.ConnDiag.Subscriptions))
 		sub := bleConn.ConnDiag.Subscriptions[0]
 		suite.Equal(goble.CancelReasonExplicit, sub.Diag.CancelReason)
-		suite.True(sub.Diag.CleanedUp)
+		suite.True(sub.Diag.CleanedUp())
 	})
 
 	suite.Run("Cancel is idempotent", func() {
@@ -3616,7 +3616,7 @@ func (suite *LuaApiTestSuite) TestSubscriptionCancellation() {
 		// Verify single explicit cancel recorded
 		sub := bleConn.ConnDiag.Subscriptions[0]
 		suite.Equal(goble.CancelReasonExplicit, sub.Diag.CancelReason)
-		suite.True(sub.Diag.CleanedUp)
+		suite.True(sub.Diag.CleanedUp())
 
 		// Verify callback ref released exactly once
 		api.callbackRefsMu.Lock()

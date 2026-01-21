@@ -524,10 +524,12 @@ if not ok then
 end
 
 -- Ensure terminal is restored on exit
-local function cleanup()
+local function cleanup(silent)
     disable_raw_mode()
     io.write(ANSI.RESET_ALL)  -- Reset ALL colors to terminal default
-    print("\nExiting...")
+    if not silent then
+        print("\nExiting...")
+    end
 end
 
 -- Main input loop: single keypress (no Enter needed)
@@ -548,8 +550,8 @@ while true do
             break
         end
     else
-        -- EOF or error
-        cleanup()
+        -- EOF or error (e.g., stdin closed on shutdown)
+        cleanup(true)  -- silent exit
         break
     end
 end
