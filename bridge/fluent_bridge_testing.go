@@ -251,7 +251,7 @@ func (f *FluentBridgeTest) runBridge(callback func(Bridge) error, opts *BridgeOp
 
 	// Run bridge with callback (uses context from ConnectWithContext if provided)
 	_, err := RunDeviceBridge(f.getContext(), opts, nil,
-		func(b Bridge) (struct{}, error) {
+		func(_ context.Context, b Bridge) (struct{}, error) {
 			f.bridge = b
 			f.LuaAPI().SetBridge(b)
 			return struct{}{}, callback(b)
@@ -414,7 +414,7 @@ func (lc *BridgeLifecycle) StartWithCallback(
 		}
 
 		_, lc.err = RunDeviceBridge(ctx, opts, nil,
-			func(b Bridge) (struct{}, error) {
+			func(_ context.Context, b Bridge) (struct{}, error) {
 				lc.bridge = b
 				lc.readyOnce.Do(func() { close(lc.ready) })
 				<-lc.done

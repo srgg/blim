@@ -162,10 +162,10 @@ func (suite *CharacteristicTestSuite) TestCharacteristicWrite() {
 		suite.Assert().NoError(err, "MUST write successfully without response")
 	})
 
-	suite.Run("empty data", func() {
-		// GOAL: Verify writing empty data is allowed
+	suite.Run("empty data rejected", func() {
+		// GOAL: Verify writing empty data is rejected (CoreBluetooth crashes with NSInternalInconsistencyException)
 		//
-		// TEST SCENARIO: Write an empty array → operation succeeds → no error
+		// TEST SCENARIO: Write an empty array → operation fails → error mentions "empty"
 
 		dev := suite.Connect("12")
 		char, err := dev.GetConnection().GetCharacteristic("180d", "2a39")
@@ -173,7 +173,8 @@ func (suite *CharacteristicTestSuite) TestCharacteristicWrite() {
 
 		err = char.Write([]byte{}, true, 5*time.Second)
 
-		suite.Assert().NoError(err, "MUST write empty data successfully")
+		suite.Assert().Error(err, "MUST reject empty data")
+		suite.Assert().Contains(err.Error(), "empty", "error MUST mention empty data")
 	})
 
 	suite.Run("large data", func() {

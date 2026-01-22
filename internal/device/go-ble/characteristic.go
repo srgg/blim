@@ -278,6 +278,11 @@ func (c *BLECharacteristic) ReadWithTimeout(timeout time.Duration) ([]byte, erro
 // This implements the device.CharacteristicWriter interface.
 // The withResponse parameter determines if write-with-response (true) or write-without-response (false) is used.
 func (c *BLECharacteristic) Write(data []byte, withResponse bool, timeout time.Duration) error {
+	// CoreBluetooth crashes with NSInternalInconsistencyException if data is nil
+	if len(data) == 0 {
+		return fmt.Errorf("cannot write empty data to characteristic %s", c.uuid)
+	}
+
 	if c.connection == nil {
 		return fmt.Errorf("no connection available for writing characteristic %s", c.uuid)
 	}

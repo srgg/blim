@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"runtime/debug"
 	"strings"
 	"sync"
@@ -14,6 +15,7 @@ import (
 	"github.com/aarzilli/golua/lua"
 	"github.com/sirupsen/logrus"
 	"github.com/srg/blim/internal/groutine"
+	"github.com/srg/blim/internal/ptyio"
 	orderedmap "github.com/wk8/go-ordered-map/v2"
 )
 
@@ -139,6 +141,12 @@ type LuaEngine struct {
 	shutdownCallbacks   *orderedmap.OrderedMap[int, func()]
 	shutdownCallbacksMu sync.Mutex
 	nextShutdownID      int
+
+	// stdinReader provides shared buffered reading from stdin.
+	// Singleton: lazily initialized on first io.read() call to avoid overhead when unused.
+	// Pre-reads from stdin into ring buffer, serves concurrent io.read() calls safely.
+	stdinReader     *ptyio.PrefetchFileReader
+	stdinReaderOnce sync.Once
 }
 
 // NewLuaEngine creates a new Lua engine with full stdout/stderr capture using the default channel capacity
@@ -453,6 +461,97 @@ func (e *LuaEngine) registerIOWriteCaptureInternal() {
 	})
 }
 
+// getStdinReader returns the singleton BufferedReader for stdin.
+// Lazily initialized on first call to avoid overhead when io.read() is unused.
+func (e *LuaEngine) getStdinReader() *ptyio.PrefetchFileReader {
+	e.stdinReaderOnce.Do(func() {
+		var err error
+		e.stdinReader, err = ptyio.NewPrefetchFileReader(os.Stdin, &ptyio.PrefetchFileReaderOptions{
+			BufferCap: 4096,
+			Logger:    e.logger,
+		})
+		if err != nil {
+			e.logger.Errorf("Failed to create stdin reader: %v", err)
+		}
+	})
+	return e.stdinReader
+}
+
+// registerIOReadContextAwareInternal overrides io.read() to be context-aware and release mutex during blocking.
+// Uses a singleton BufferedReader for stdin to handle concurrent io.read() calls safely.
+// Pattern: Table setup like io.write, mutex handling like blim.sleep()
+func (e *LuaEngine) registerIOReadContextAwareInternal() {
+	e.doWithStateInternal(func(L *lua.State) interface{} {
+		// Same pattern as io.write: get io table, set read function
+		L.GetGlobal("io")
+		if L.IsTable(-1) {
+			L.PushString("read")
+			L.PushGoFunction(e.SafeWrapGoFunction("io.read()", func(L *lua.State) int {
+				// Parse format argument: number means read N bytes, default "*l" for line
+				var count int
+				if L.GetTop() >= 1 && L.IsNumber(1) {
+					count = L.ToInteger(1)
+				}
+
+				// Get execution context for cancellation support
+				ctx := e.scriptExecutionCtx
+				if ctx == nil {
+					ctx = context.Background()
+				}
+
+				// Get singleton stdin reader (lazy initialization)
+				reader := e.getStdinReader()
+				if reader == nil {
+					e.logger.Error("[io.read] stdin reader unavailable")
+					L.PushNil()
+					return 1
+				}
+
+				// CRITICAL: Release mutex before blocking (like blim.sleep)
+				// This allows other goroutines (e.g., subscription callbacks) to execute
+				e.stateMutex.Unlock()
+
+				var data string
+				var err error
+
+				if count > 0 {
+					// Read exactly N bytes
+					var bytes []byte
+					bytes, err = reader.ReadBytes(ctx, count)
+					if err == nil {
+						data = string(bytes)
+					}
+				} else {
+					// Read line (default behavior)
+					data, err = reader.ReadLine(ctx)
+					// Strip trailing newline for Lua compatibility
+					data = strings.TrimSuffix(data, "\n")
+				}
+
+				// CRITICAL: Reacquire mutex BEFORE any Lua stack operations
+				// (Using explicit Lock instead of defer to ensure mutex is held during L.Push*)
+				e.stateMutex.Lock()
+
+				if err != nil {
+					if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+						e.logger.Debug("[io.read] interrupted by context cancellation")
+					} else if !errors.Is(err, ptyio.ErrReaderClosed) {
+						e.logger.Debugf("[io.read] error: %v", err)
+					}
+					L.PushNil()
+					return 1
+				}
+
+				L.PushString(data)
+				return 1
+			}))
+			L.SetTable(-3)
+		}
+		L.Pop(1) // Pop io table
+		return nil
+	})
+}
+
 // PreloadLuaLibrary loads a Lua library script into a package.loaded[libraryName]
 // This generic function follows the RegisterLibrary pattern and avoids package.preload callback issues.
 func (e *LuaEngine) PreloadLuaLibrary(libraryCode, libraryName, errorContext string) {
@@ -740,7 +839,7 @@ func (e *LuaEngine) resetInternal() {
 
 	e.registerPrintCaptureInternal()
 	e.registerIOWriteCaptureInternal()
-	//e.registerIOReadContextAwareInternal()
+	e.registerIOReadContextAwareInternal()
 	e.preloadJSONLibInternal()
 	e.registerBlockedLuaFunctions()
 
@@ -764,6 +863,13 @@ func (e *LuaEngine) Close() {
 	e.logger.Debug("[LuaEngine.Close] mutex acquired")
 	defer e.stateMutex.Unlock()
 
+	// Close stdin reader if it was initialized (stops background goroutines)
+	if e.stdinReader != nil {
+		e.logger.Debug("[LuaEngine.Close] closing stdin reader...")
+		_ = e.stdinReader.Close()
+		e.stdinReader = nil
+	}
+
 	if e.state != nil {
 		// Clear the debug hook before closing - the hook closure may reference
 		// an invalid context after cancellation. Use no-op function (not nil)
@@ -780,7 +886,7 @@ func (e *LuaEngine) Close() {
 		// e.logger.Debug("[LuaEngine.Close] running full GC cycle...")
 		// e.state.GC(lua.LUA_GCCOLLECT, 0)
 
-		// // Stop GC so no finalizers run during lua_close() teardown
+		// // Stop GC so no finalizers run during lua_close() teardownBut ed
 		// e.logger.Debug("[LuaEngine.Close] stopping GC...")
 		// e.state.GC(lua.LUA_GCSTOP, 0)
 

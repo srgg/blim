@@ -11,6 +11,7 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/srg/blim/internal/device"
 	"github.com/srg/blim/internal/devicefactory"
+	"github.com/srg/blim/internal/groutine"
 	"github.com/srg/blim/internal/lua"
 	"github.com/srg/blim/internal/ptyio"
 )
@@ -50,7 +51,8 @@ type BridgeOptions struct {
 type ProgressCallback func(phase string)
 
 // BridgeCallback is executed with the running bridge (mirrors InspectCallback)
-type BridgeCallback[R any] func(Bridge) (R, error)
+// The context is bridgeCtx which gets cancelled on BLE disconnect or parent cancellation.
+type BridgeCallback[R any] func(ctx context.Context, b Bridge) (R, error)
 
 // bridgeImpl implements the Bridge interface
 type bridgeImpl struct {
@@ -119,9 +121,9 @@ func RunDeviceBridge[R any](
 		opts.BleConnectTimeout = 30 * time.Second
 	}
 
-	// Create context for cancellation
-	bridgeCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	// Create context for cancellation with cause support (enables disconnect detection)
+	bridgeCtx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
 
 	// Setup cleanup on error
 	var (
@@ -183,6 +185,37 @@ func RunDeviceBridge[R any](
 		return zero, fmt.Errorf("failed to create Lua API for device %s: %w", opts.BleAddress, err)
 	}
 
+	// Monitor connection context and cancel bridgeCtx on disconnection.
+	// This ensures callbacks receive context cancellation when BLE device disconnects.
+	conn := luaApi.GetDevice().GetConnection()
+	if conn != nil {
+		connCtx := conn.ConnectionContext()
+		if connCtx != nil {
+			groutine.Go(ctx, "ble-conn-monitor", func(_ context.Context) {
+				select {
+				case <-connCtx.Done():
+					logger.Debug("[BLEConMon] Ble connection context is done")
+					cause := context.Cause(connCtx)
+					if cause != nil && errors.Is(cause, device.ErrNotConnected) {
+						logger.Info("[BLEConMon] Device disconnected, cancelling bridge context with ErrConnectionLost...")
+						cancel(device.ErrConnectionLost)
+					} else if cause != nil {
+						logger.Infof("[BLEConMon] Device disconnected, cancelling bridge context with cause: %v...", cause)
+						cancel(cause)
+					} else {
+						logger.Info("[BLEConMon] Device disconnected, cancelling bridge context without Canceled")
+						cancel(context.Canceled)
+					}
+				case <-bridgeCtx.Done():
+					// Bridge context already cancelled (e.g., user Ctrl+C)
+					logger.Debug("[BLEConMon] bridge context is already canceled, exiting")
+				}
+
+				logger.Debug("[BLEConMon] Ble connection monitor finished")
+			})
+		}
+	}
+
 	// Report phase: Connected
 	progressCallback("Connected")
 
@@ -230,8 +263,19 @@ func RunDeviceBridge[R any](
 	// Set bridge info on Lua API (enables pty_write/pty_read via strategy)
 	luaApi.SetBridge(bridge)
 
-	// Execute callback with the bridge
-	return callback(bridge)
+	// Register shutdown hook to close PTY on context cancellation.
+	// This unblocks any PTY write operations (e.g., buffer full) so the script can exit cleanly
+	// when device disconnects. Unlike Disconnect() which causes SIGBUS if called during script
+	// execution, PTY close is safe and just sends EOF to unblock I/O operations.
+	luaApi.AddShutdownHook(func() {
+		logger.Debug("Shutdown hook: closing PTY to unblock operations")
+		if pty != nil {
+			_ = pty.Close()
+		}
+	})
+
+	// Execute callback with the bridge context and bridge
+	return callback(bridgeCtx, bridge)
 }
 
 // CLIBridgeConfig configures the CLI bridge runner.
@@ -256,12 +300,12 @@ type CLIBridgeConfig struct {
 }
 
 func RunCliBridge(ctx context.Context, progressCallback ProgressCallback, opts CLIBridgeConfig) error {
-	// Bridge callback - executes the Lua script with output streaming
-	bridgeCallback := func(b Bridge) (any, error) {
-
-		// HACK: Create an output drainer to capture output from the Lua API,
-		// 		even though the script execution completed, the bridge is keeping the Lua State open, using it by
-		// 		calling the Lua callbacks until the bridge is canceled.
+	// Bridge callback - executes the Lua script with output streaming.
+	// The ctx parameter is bridgeCtx from RunDeviceBridge, which gets cancelled on disconnect.
+	bridgeCallback := func(ctx context.Context, b Bridge) (any, error) {
+		// Create an output drainer to capture output from the Lua API.
+		// The bridge keeps Lua state open after script execution completes,
+		// using it to call Lua callbacks until the bridge is canceled.
 		drainer := lua.NewOutputDrainer(ctx, b.GetLuaAPI().OutputChannel(), opts.Logger, opts.Stdout, opts.Stderr)
 
 		defer func() {
@@ -285,59 +329,30 @@ func RunCliBridge(ctx context.Context, progressCallback ProgressCallback, opts C
 			opts.ScriptOpts,
 		)
 		if err != nil {
+			// Check if error was due to disconnection
+			cause := context.Cause(ctx)
+			if cause != nil && errors.Is(cause, device.ErrConnectionLost) {
+				return nil, device.ErrConnectionLost
+			}
 			return nil, err
 		}
-
-		// Script executed successfully, and subscriptions are active
-		// Monitor connection context for errors (e.g., disconnection)
-		dev := b.GetLuaAPI().GetDevice()
-		conn := dev.GetConnection()
-		if conn == nil {
-			return nil, fmt.Errorf("no connection available")
-		}
-
-		connCtx := conn.ConnectionContext()
-		if connCtx == nil {
-			return nil, fmt.Errorf("connection context not available")
-		}
-
-		opts.Logger.WithField("context_ptr", fmt.Sprintf("%p", connCtx)).
-			Info("Bridge monitoring started, waiting for connection errors or shutdown...")
 
 		// Signal that bridge is fully ready (script loaded and executed successfully)
 		if progressCallback != nil {
 			progressCallback("Ready")
 		}
 
-		select {
-		case <-connCtx.Done():
-			// Connection context canceled - check the cause
-			cause := context.Cause(connCtx)
+		opts.Logger.Info("Bridge monitoring started, waiting for shutdown or disconnect...")
 
-			if cause != nil {
-				if errors.Is(cause, device.ErrNotConnected) {
-					// Connection lost
-					return nil, device.ErrConnectionLost
-				}
-
-				// Connection context canceled with unknown cause
-				return nil, fmt.Errorf("connection error: %w", cause)
-			}
-			// Context canceled without cause (normal shutdown)
-			return nil, nil
-		case <-ctx.Done():
-			// Before returning, check if connection was also lost.
-			// When both channels are ready, Go's select picks randomly -
-			// we must check connCtx to avoid swallowing disconnect errors.
-			if connCtx.Err() != nil {
-				cause := context.Cause(connCtx)
-				if cause != nil && errors.Is(cause, device.ErrNotConnected) {
-					return nil, device.ErrConnectionLost
-				}
-			}
-			opts.Logger.Info("Bridge shutting down...")
-			return nil, nil
+		// Wait for context cancellation (handles both disconnect AND Ctrl+C)
+		// RunDeviceBridge cancels ctx with ErrConnectionLost on disconnect
+		<-ctx.Done()
+		cause := context.Cause(ctx)
+		if cause != nil && errors.Is(cause, device.ErrConnectionLost) {
+			return nil, device.ErrConnectionLost
 		}
+		opts.Logger.Info("Bridge shutting down...")
+		return nil, nil
 	}
 
 	// Run the bridge with callback

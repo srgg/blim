@@ -1292,16 +1292,17 @@ func (suite *LuaApiTestSuite) TestCharacteristicWrite() {
 			`,
 		},
 		TestCase{
-			// GOAL: Verify write() accepts empty string as valid data
+			// GOAL: Verify write() rejects empty string (CoreBluetooth crashes with NSInternalInconsistencyException)
 			//
-			// TEST SCENARIO: Write empty string "" → success → verify (true, nil) returned
+			// TEST SCENARIO: Write empty string "" → error → verify error message mentions empty data
 
-			Name: "char.write() supports empty string",
+			Name: "char.write() rejects empty string",
 			Script: `
 				local char = blim.characteristic("1234", "ABCD")
 				local result, err = char.write("")
-				assert(result == true, "write should succeed with empty string")
-				assert(err == nil, "write should not return error")
+				assert(result == nil, "write should fail with empty string")
+				assert(err ~= nil, "write should return error")
+				assert(string.find(err, "empty"), "error should mention empty data, got: " .. tostring(err))
 			`,
 		},
 		TestCase{

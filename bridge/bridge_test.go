@@ -12,7 +12,6 @@ import (
 	"github.com/srg/blim/internal/device"
 	"github.com/srg/blim/internal/devicefactory"
 	"github.com/srg/blim/internal/lua"
-	"github.com/srg/blim/internal/ptyio"
 	"github.com/srg/blim/internal/testutils"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
@@ -188,7 +187,7 @@ Bridge is running. Press Ctrl+C to stop the bridge.
 				emitter.
 					WithService("1234").
 					WithCharacteristic("5678", 0x48, 0x65, 0x6c, 0x6c, 0x6f, 0x20, 0x57, 0x6f, 0x72, 0x6c, 0x64, 0x21). // "Hello World!"
-					WithCharacteristic("90ab", 0x42, 0x3A, 0x7D, 0x8E). // ASCII-safe binary
+					WithCharacteristic("90ab", 0x42, 0x3A, 0x7D, 0x8E).                                                 // ASCII-safe binary
 					//
 					WithService("180f").
 					WithCharacteristic("2a19", 0x42).
@@ -199,7 +198,7 @@ Bridge is running. Press Ctrl+C to stop the bridge.
 			expectedRecords: func(b *lua.ExpectedRecordsBuilder) {
 				b.IgnoreFields("TsUs", "callNo", "Seq").
 					Record().Value("5678", 0x48, 0x65, 0x6c, 0x6c, 0x6f, 0x20, 0x57, 0x6f, 0x72, 0x6c, 0x64, 0x21). // "Hello World!"
-					Record().Value("90ab", 0x42, 0x3A, 0x7D, 0xEF, 0xBF, 0xBD). // 0x8E becomes UTF-8 replacement char
+					Record().Value("90ab", 0x42, 0x3A, 0x7D, 0xEF, 0xBF, 0xBD).                                     // 0x8E becomes UTF-8 replacement char
 					Record().Value("2a19", 0x42)
 			},
 		},
@@ -956,16 +955,20 @@ func (suite *BridgeTestSuite) TestRunCliBridgeIntegration() {
 	suite.Run("shuts down cleanly when script is blocked on io.read", func() {
 		// GOAL: Verify bridge exits cleanly when the Lua script is blocked on io.read() and context is cancelled
 		//
-		// TEST SCENARIO: Start bridge with io.read() script → cancel context → call relay.Close() → bridge exits within maxShutdownDuration
+		// TEST SCENARIO: Start bridge with io.read() script → cancel context → close pipe to send EOF → bridge exits within maxShutdownDuration
 		//
-		// This tests the real mechanism used by the CLI: PTYRelay replaces fd 0 with a closeable
-		// pipe/PTY, and Close() sends EOF to unblock io.read().
+		// Mechanism: Create a pipe, temporarily swap os.Stdin, close writer to send EOF and unblock io.read()
 
-		// Create PTYRelay - replaces fd 0 with a closeable descriptor
-		// In tests, stdin is not a TTY so this uses a plain pipe internally
-		relay, err := ptyio.NewPTYRelay(suite.Logger)
-		suite.Require().NoError(err, "Failed to create PTYRelay")
-		defer relay.Cleanup()
+		// Create pipe to replace stdin - closing writer sends EOF to unblock io.read()
+		pipeReader, pipeWriter, err := os.Pipe()
+		suite.Require().NoError(err, "Failed to create pipe")
+		defer pipeReader.Close()
+		defer pipeWriter.Close()
+
+		// Swap os.Stdin with pipe reader (restore after test)
+		originalStdin := os.Stdin
+		os.Stdin = pipeReader
+		defer func() { os.Stdin = originalStdin }()
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -1008,12 +1011,9 @@ func (suite *BridgeTestSuite) TestRunCliBridgeIntegration() {
 		// Give script time to start and block on io.read()
 		time.Sleep(200 * time.Millisecond)
 
-		// Cancel context AND close relay to unblock io.read()
-		// This tests the real mechanism used by the CLI signal handler
+		// Cancel context AND close pipe writer to send EOF and unblock io.read()
 		cancel()
-
-		// Unblock LUA io.read() by triggering EOF
-		_ = relay.Close()
+		_ = pipeWriter.Close()
 
 		// Bridge MUST exit within maxShutdownDuration, not hang waiting for input
 		select {
