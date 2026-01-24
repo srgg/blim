@@ -18,7 +18,7 @@ require (
 
 require (
 	github.com/dop251/goja v0.0.0-20260106131823-651366fbe6e3
-	github.com/hedzr/go-ringbuf/v2 v2.2.2
+	github.com/hedzr/go-ringbuf/v2 v2.2.3
 	github.com/smallnest/ringbuffer v0.0.0-20250317021400-0da97b586904
 	github.com/srgg/testify v0.1.1
 	github.com/wk8/go-ordered-map/v2 v2.1.8
@@ -43,7 +43,6 @@ require (
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/mgutz/ansi v0.0.0-20200706080929-d51e80ef957d // indirect
 	github.com/mgutz/logxi v0.0.0-20161027140823-aebf8a7d67ab // indirect
-	github.com/nsf/jsondiff v0.0.0-20230430225905-43f6cf3098c1 // indirect
 	github.com/onsi/ginkgo v1.16.5 // indirect
 	github.com/onsi/gomega v1.38.2 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
@@ -62,8 +61,6 @@ require (
 //replace github.com/aarzilli/golua => /Users/srg/src/golua
 
 replace github.com/go-ble/ble => github.com/srgg/go-ble v0.0.0-20251019021511-162008c817dc
-
-replace github.com/hedzr/go-ringbuf/v2 => /Users/srg/src/go-ringbuf
 
 tool github.com/srgg/testify/depend/cmd/dependgen
 
