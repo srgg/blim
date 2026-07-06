@@ -1,0 +1,63 @@
+name: Set up Go + LuaJIT
+description: >-
+  Installs Go and LuaJIT and configures CGO / pkg-config for the blim build.
+  Shared by the CI and Release workflows. Requires the repo to be checked out
+  first (it is referenced as a local action).
+
+inputs:
+  go-version:
+    description: Go toolchain version.
+    default: '1.24'
+  static-linking:
+    description: >-
+      When 'true', force static LuaJIT linking via a generated pkg-config file
+      (used for release binaries). Otherwise link dynamically against the
+      Homebrew LuaJIT, which is fine for building and testing.
+    default: 'false'
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-go@v5
+      with:
+        go-version: ${{ inputs.go-version }}
+
+    - name: Install LuaJIT
+      shell: bash
+      run: brew install luajit
+
+    - name: Configure common build environment
+      shell: bash
+      run: |
+        # go-installed tools (e.g. mockery) must be on PATH; the luajit build tag needs CGO.
+        echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+        echo "CGO_ENABLED=1" >> "$GITHUB_ENV"
+
+    - name: Configure LuaJIT (dynamic linking)
+      if: inputs.static-linking != 'true'
+      shell: bash
+      run: |
+        # Point CGO/pkg-config at the Homebrew LuaJIT — same paths the Makefile uses locally.
+        echo "PKG_CONFIG_PATH=$(brew --prefix)/lib/pkgconfig" >> "$GITHUB_ENV"
+        echo "CGO_LDFLAGS=-L$(brew --prefix)/lib" >> "$GITHUB_ENV"
+
+    - name: Configure LuaJIT (static linking)
+      if: inputs.static-linking == 'true'
+      shell: bash
+      run: |
+        # Generate a pkg-config file that forces static linking against libluajit-5.1.a,
+        # so release binaries carry no dynamic LuaJIT dependency.
+        LUAJIT_PREFIX=$(brew --prefix luajit)
+        mkdir -p /tmp/pkgconfig
+        cat > /tmp/pkgconfig/lua5.1.pc << EOF
+        prefix=${LUAJIT_PREFIX}
+        libdir=\${prefix}/lib
+        includedir=\${prefix}/include/luajit-2.1
+
+        Name: LuaJIT
+        Description: LuaJIT (static)
+        Version: 2.1
+        Libs: \${libdir}/libluajit-5.1.a
+        Cflags: -I\${includedir}
+        EOF
+        echo "PKG_CONFIG_PATH=/tmp/pkgconfig" >> "$GITHUB_ENV"
