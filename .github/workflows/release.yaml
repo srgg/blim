@@ -46,7 +46,7 @@ jobs:
       - name: Build
         run: |
           mkdir -p dist
-          go build -ldflags "-s -w -X main.version=${{ github.ref_name }} -X main.commit=$(git rev-parse --short HEAD)" \
+          go build -ldflags "-s -w -X main.version=${{ github.ref_name }} -X main.commit=$(git rev-parse --short HEAD) -X main.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             -o dist/blim ./cmd/blim
 
       - name: Verify static linking
@@ -150,9 +150,6 @@ jobs:
             end
           end
           FORMULA
-
-          # Remove leading whitespace
-          sed -i 's/^          //' tap/Formula/blim.rb
 
           # Commit and push
           cd tap

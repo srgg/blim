@@ -22,12 +22,12 @@ archives:
 
 brews:
   - repository:
-      owner: srg
+      owner: srgg
       name: homebrew-blim
       branch: main
       token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
     directory: Formula
-    homepage: "https://github.com/srg/blecli"
+    homepage: "https://github.com/srgg/blim"
     description: "BLE command-line tool with Lua scripting for device automation"
     license: "MIT"
     install: |
