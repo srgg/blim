@@ -98,7 +98,7 @@ site_name: BLIM CLI Documentation
 site_description: Bluetooth Low Energy CLI tool for macOS
 site_author: BLIM Project
 repo_url: https://github.com/srgg/blim
-repo_name: srg/blim
+repo_name: srgg/blim
 
 theme:
   name: material
