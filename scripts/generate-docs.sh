@@ -69,7 +69,7 @@ if [ -n "$PACKAGES" ]; then
     for pkg in $PACKAGES; do
         # Extract package name and path
         pkg_name=$(basename "$pkg")
-        pkg_path=$(echo "$pkg" | sed "s|^github.com/srg/blim/||")
+        pkg_path=$(echo "$pkg" | sed "s|^github.com/srgg/blim/||")
 
         echo "  - Generating docs for $pkg_name ($pkg_path)..."
         if gomarkdoc --output "$DOCS_BUILD_DIR/docs/api/${pkg_name}.md" "./$pkg_path" 2>/dev/null; then
@@ -97,7 +97,7 @@ cat > "$DOCS_BUILD_DIR/mkdocs.yml" <<EOF
 site_name: BLIM CLI Documentation
 site_description: Bluetooth Low Energy CLI tool for macOS
 site_author: BLIM Project
-repo_url: https://github.com/srg/blim
+repo_url: https://github.com/srgg/blim
 repo_name: srg/blim
 
 theme:
@@ -168,7 +168,7 @@ View the [API Reference](api/overview.md) for detailed documentation of all pack
 ## Installation
 
 ```bash
-go install github.com/srg/blim/cmd/blim@latest
+go install github.com/srgg/blim/cmd/blim@latest
 ```
 
 ## Usage
@@ -177,8 +177,8 @@ go install github.com/srg/blim/cmd/blim@latest
 # Scan for BLE devices
 blim scan
 
-# Connect to a device
-blim connect AA:BB:CC:DD:EE:FF
+# Inspect a device's services and characteristics
+blim inspect AA:BB:CC:DD:EE:FF
 ```
 EOF
 
