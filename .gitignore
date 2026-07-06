@@ -57,5 +57,8 @@ compile_commands.json
 # Generated testify/depend dependency files
 *_depend_test.go
 
+# macOS Finder metadata
+.DS_Store
+
 # GoReleaser output
 dist/
