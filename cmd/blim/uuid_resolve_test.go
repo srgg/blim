@@ -5,8 +5,8 @@ package main
 import (
 	"testing"
 
-	"github.com/srg/blim/internal/device"
-	"github.com/srg/blim/internal/testutils"
+	"github.com/srgg/blim/internal/device"
+	"github.com/srgg/blim/internal/testutils"
 	"github.com/stretchr/testify/suite"
 )
 

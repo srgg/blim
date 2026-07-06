@@ -12,10 +12,11 @@ import (
 
 	_ "embed"
 
-	"github.com/srg/blim/internal/device"
-	goble "github.com/srg/blim/internal/device/go-ble"
-	"github.com/srg/blim/internal/groutine"
-	"github.com/srg/blim/internal/testutils"
+	"github.com/aarzilli/golua/lua"
+	"github.com/srgg/blim/internal/device"
+	goble "github.com/srgg/blim/internal/device/go-ble"
+	"github.com/srgg/blim/internal/groutine"
+	"github.com/srgg/blim/internal/testutils"
 	suitelib "github.com/stretchr/testify/suite"
 )
 
@@ -3692,6 +3693,101 @@ func (suite *LuaApiTestSuite) TestSubscriptionCancellation() {
 			"Goroutine leak detected after %d iterations: initial=%d, final=%d, leaked=%d",
 			iterations, initialGoroutines, finalGoroutines, leakedGoroutines)
 	})
+}
+
+// TestProtectedCall verifies blim.pcall — the sandbox substitute for the
+// hidden Lua pcall (golua removes pcall/xpcall because their longjmp-based
+// unwinding across active Go frames corrupts the Go stack). blim.pcall is
+// LuaJIT's native pcall: it catches Lua/C errors; errors raised by Go-backed
+// functions are Go panics and abort the script by design.
+func (suite *LuaApiTestSuite) TestProtectedCall() {
+	suite.Run("success passes through all results", func() {
+		// GOAL: Verify a protected call reports success and forwards every
+		//       return value of the wrapped function unchanged.
+		//
+		// TEST SCENARIO: protected call of a multi-result function → true plus all results → values match
+
+		suite.Connect("1").FluentLuaTest().
+			MustExecuteScript(`
+				local ok, a, b, c = blim.pcall(function(x) return x, x + 1, "z" end, 1)
+				assert(ok == true, "protected call MUST succeed")
+				assert(a == 1 and b == 2 and c == "z", "all results MUST pass through unchanged")
+			`)
+	})
+
+	suite.Run("Lua error is caught as a value", func() {
+		// GOAL: Verify an error raised by plain Lua code inside a protected
+		//       call is reported as a return value instead of aborting the
+		//       script.
+		//
+		// TEST SCENARIO: protected call of an erroring function → false plus message → script continues running
+
+		suite.Connect("1").FluentLuaTest().
+			MustExecuteScript(`
+				local ok, err = blim.pcall(function() error("boom") end)
+				assert(ok == false, "protected call MUST report failure")
+				assert(tostring(err):find("boom"), "error message MUST be preserved, got: " .. tostring(err))
+			`)
+	})
+
+	suite.Run("error from a Go-backed function aborts the script", func() {
+		// GOAL: Pin the documented blim.pcall limitation: errors raised by
+		//       Go-backed functions are Go-side panics that bypass the native
+		//       pcall — the script aborts with the original error, and the
+		//       engine survives it (the same path as any unprotected script
+		//       error).
+		//
+		// TEST SCENARIO: protected call of require with a missing module → script aborts with the require error → engine still runs the next script
+
+		suite.Connect("1").FluentLuaTest().
+			FailExecuteScript("no_such_module", `
+				blim.pcall(require, "no_such_module")
+			`).
+			MustExecuteScript(`
+				assert(blim.pcall(function() return true end) == true,
+					"engine MUST stay healthy after an uncaught Go-side error")
+			`)
+	})
+}
+
+// TestSubscribeParsesDrainDuration is a white-box regression test for the
+// DrainDuration subscription option, which was silently dropped: the parser
+// checked IsNumber on the pushed key instead of the table value, so any
+// DrainDuration a script passed was ignored and drain stayed disabled.
+//
+// The value is asserted at the parse boundary (parseSubscriptionTable) rather
+// than end-to-end: drainDuration is consumed below the ble.Client mock (in the
+// real BLEConnection.Subscribe) and its effect is timing-dependent, so the
+// deterministic pin is that the parsed config carries the requested value.
+func (suite *LuaApiTestSuite) TestSubscribeParsesDrainDuration() {
+	// GOAL: Verify blim.subscribe reads the DrainDuration option from the Lua
+	//       table, and defaults it to 0 when omitted.
+	//
+	// TEST SCENARIO: parse a table with DrainDuration=250 → config carries 250 → omitting it yields 0
+
+	api := suite.Connect("00:00:00:00:00:01").FluentLuaTest().LuaAPI()
+
+	parseDrain := func(fields string) int {
+		var got int
+		api.LuaEngine.DoWithState(func(L *lua.State) interface{} {
+			suite.Require().Zero(L.DoString(`return {
+				services = {{ service = "1234", chars = {"5678"} }},
+				Callback = function() end,
+				`+fields+`
+			}`), "table snippet MUST load")
+			cfg, err := api.parseSubscriptionTable(L, L.GetTop())
+			suite.Require().NoError(err, "parse MUST succeed")
+			got = cfg.DrainDuration
+			L.Pop(1)
+			return nil
+		})
+		return got
+	}
+
+	suite.Equal(250, parseDrain("DrainDuration = 250"),
+		"DrainDuration MUST be read from the table")
+	suite.Equal(0, parseDrain(""),
+		"omitted DrainDuration MUST default to 0")
 }
 
 // TestLuaAPITestSuite runs the test suite using testify/suite

@@ -7,9 +7,9 @@ import (
 
 	"github.com/go-ble/ble"
 	"github.com/sirupsen/logrus"
-	"github.com/srg/blim/internal/bledb"
-	"github.com/srg/blim/internal/device"
-	"github.com/srg/blim/internal/groutine"
+	"github.com/srgg/blim/internal/bledb"
+	"github.com/srgg/blim/internal/device"
+	"github.com/srgg/blim/internal/groutine"
 )
 
 const (

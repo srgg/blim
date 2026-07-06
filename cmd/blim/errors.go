@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 
-	"github.com/srg/blim/internal/device"
+	"github.com/srgg/blim/internal/device"
 )
 
 // FormatUserError converts errors to user-friendly messages without technical details.

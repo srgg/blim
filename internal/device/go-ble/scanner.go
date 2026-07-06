@@ -4,7 +4,7 @@ import (
 	"context"
 
 	ble "github.com/go-ble/ble"
-	"github.com/srg/blim/internal/device"
+	"github.com/srgg/blim/internal/device"
 )
 
 // bleScanner wraps ble.Device to implement a device.Scanner interface

@@ -38,7 +38,9 @@ var rootCmd = &cobra.Command{
 - Lua scripting API for advanced automation and protocol handling; see bridge and inspect commands.
 
 Ideal for firmware development, automated testing, and BLE protocols exploration.`,
-	Version: formatVersion(version),
+	// version, commit, and date are injected at release time via -ldflags -X
+	// (see .github/workflows/release.yaml and the Makefile).
+	Version: fmt.Sprintf("%s (commit %s, built %s)", formatVersion(version), commit, date),
 }
 
 func main() {

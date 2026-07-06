@@ -12,11 +12,11 @@ import (
 
 	blelib "github.com/go-ble/ble"
 	"github.com/sirupsen/logrus"
-	"github.com/srg/blim/internal/device"
-	goble "github.com/srg/blim/internal/device/go-ble"
-	"github.com/srg/blim/internal/devicefactory"
-	"github.com/srg/blim/internal/testutils"
-	"github.com/srg/blim/scanner"
+	"github.com/srgg/blim/internal/device"
+	goble "github.com/srgg/blim/internal/device/go-ble"
+	"github.com/srgg/blim/internal/devicefactory"
+	"github.com/srgg/blim/internal/testutils"
+	"github.com/srgg/blim/scanner"
 	"github.com/stretchr/testify/suite"
 )
 

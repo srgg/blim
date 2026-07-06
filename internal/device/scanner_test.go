@@ -8,9 +8,9 @@ import (
 	"testing"
 
 	"github.com/go-ble/ble"
-	"github.com/srg/blim/internal/device"
-	goble "github.com/srg/blim/internal/device/go-ble"
-	blemocks "github.com/srg/blim/internal/testutils/mocks/goble"
+	"github.com/srgg/blim/internal/device"
+	goble "github.com/srgg/blim/internal/device/go-ble"
+	blemocks "github.com/srgg/blim/internal/testutils/mocks/goble"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/suite"
 )

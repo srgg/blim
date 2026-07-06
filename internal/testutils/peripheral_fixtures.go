@@ -2,7 +2,7 @@
 
 package testutils
 
-import "github.com/srg/blim/internal/device"
+import "github.com/srgg/blim/internal/device"
 
 // StandardPeripheral is the universal default peripheral for most command device_test.
 // Contains Heart Rate (180d) and Battery (180f) services with common characteristics.

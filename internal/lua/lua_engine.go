@@ -14,8 +14,8 @@ import (
 
 	"github.com/aarzilli/golua/lua"
 	"github.com/sirupsen/logrus"
-	"github.com/srg/blim/internal/groutine"
-	"github.com/srg/blim/internal/ptyio"
+	"github.com/srgg/blim/internal/groutine"
+	"github.com/srgg/blim/internal/ptyio"
 	orderedmap "github.com/wk8/go-ordered-map/v2"
 )
 
@@ -552,18 +552,29 @@ func (e *LuaEngine) registerIOReadContextAwareInternal() {
 	})
 }
 
-// PreloadLuaLibrary loads a Lua library script into a package.loaded[libraryName]
+// PreloadLuaLibrary loads a Lua library script into package.loaded[libraryName].
 // This generic function follows the RegisterLibrary pattern and avoids package.preload callback issues.
+//
+// PANICS on failure: every caller preloads a go:embed asset compiled into the
+// binary, so a load/execute failure means the binary itself is broken and MUST
+// NOT degrade into a partially-initialized engine (scripts would later die with
+// opaque nil-index errors). Callers must not recover this.
 func (e *LuaEngine) PreloadLuaLibrary(libraryCode, libraryName, errorContext string) {
-	e.doWithStateInternal(func(L *lua.State) interface{} {
+	result := e.doWithStateInternal(func(L *lua.State) interface{} {
 		// Load and execute the Lua module
 		if err := L.LoadString(libraryCode); err != 0 {
-			e.logger.Errorf("Failed to load embedded %s", errorContext)
-			return nil
+			msg := L.ToString(-1)
+			L.Pop(1) // drop the error message; leaving it corrupts the persistent stack
+			return fmt.Errorf("failed to load embedded %s: %s", errorContext, msg)
 		}
 
-		// Execute the chunk to get the module table
-		L.Call(0, 1) // runs chunk -> pushes module table
+		// Execute the chunk to get the module table. On failure the error message
+		// stays on the stack; it MUST be popped, otherwise every later script error
+		// walks a corrupted stack (LUA_ERRERR or SIGSEGV in lua_getinfo).
+		if err := L.Call(0, 1); err != nil {
+			L.Pop(1)
+			return fmt.Errorf("failed to execute embedded %s: %w", errorContext, err)
+		}
 
 		// Put it directly into package.loaded[libraryName] like RegisterLibrary does
 		L.GetField(lua.LUA_GLOBALSINDEX, "package")
@@ -573,6 +584,9 @@ func (e *LuaEngine) PreloadLuaLibrary(libraryCode, libraryName, errorContext str
 		L.Pop(2)                    // Pop package and loaded
 		return nil
 	})
+	if err, ok := result.(error); ok {
+		panic(err)
+	}
 }
 
 // preloadJSONLibInternal loads the embedded JSON.lua library directly into the package.loaded["json"]

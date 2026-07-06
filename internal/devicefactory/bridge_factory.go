@@ -5,9 +5,9 @@ import (
 	"os"
 
 	"github.com/sirupsen/logrus"
-	"github.com/srg/blim/internal/device"
-	"github.com/srg/blim/internal/lua"
-	"github.com/srg/blim/internal/ptyio"
+	"github.com/srgg/blim/internal/device"
+	"github.com/srgg/blim/internal/lua"
+	"github.com/srgg/blim/internal/ptyio"
 )
 
 // BridgeFactory creates bridge components.

@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/srg/blim/inspector"
-	"github.com/srg/blim/internal/device"
+	"github.com/srgg/blim/inspector"
+	"github.com/srgg/blim/internal/device"
 )
 
 // writeCmd represents the write command

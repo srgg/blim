@@ -2,7 +2,7 @@ package goble
 
 import (
 	"github.com/go-ble/ble"
-	"github.com/srg/blim/internal/device"
+	"github.com/srgg/blim/internal/device"
 )
 
 // BLEProperty represents a single BLE characteristic property with its bit flag value and human-readable name.

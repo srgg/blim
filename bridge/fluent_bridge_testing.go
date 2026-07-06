@@ -10,10 +10,10 @@ import (
 	"time"
 
 	"github.com/sirupsen/logrus"
-	"github.com/srg/blim/internal/device"
-	"github.com/srg/blim/internal/devicefactory"
-	"github.com/srg/blim/internal/lua"
-	"github.com/srg/blim/internal/ptyio"
+	"github.com/srgg/blim/internal/device"
+	"github.com/srgg/blim/internal/devicefactory"
+	"github.com/srgg/blim/internal/lua"
+	"github.com/srgg/blim/internal/ptyio"
 )
 
 // ChannelPTY is the channel name for PTY output (bridge-specific).

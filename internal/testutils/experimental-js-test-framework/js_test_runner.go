@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	"github.com/dop251/goja"
-	"github.com/srg/blim/internal/testutils"
+	"github.com/srgg/blim/internal/testutils"
 
 	_ "embed"
 )

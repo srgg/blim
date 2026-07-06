@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/srg/blim/internal/device"
+	"github.com/srgg/blim/internal/device"
 	"github.com/stretchr/testify/assert"
 )
 

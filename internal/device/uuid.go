@@ -3,7 +3,7 @@ package device
 import (
 	"fmt"
 
-	"github.com/srg/blim/internal/bledb"
+	"github.com/srgg/blim/internal/bledb"
 )
 
 // NormalizeUUID is re-exported from bledb for convenience.

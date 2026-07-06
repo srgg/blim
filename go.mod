@@ -1,4 +1,4 @@
-module github.com/srg/blim
+module github.com/srgg/blim
 
 go 1.24.2
 

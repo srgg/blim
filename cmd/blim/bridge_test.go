@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/sirupsen/logrus"
-	"github.com/srg/blim/internal/testutils"
+	"github.com/srgg/blim/internal/testutils"
 	"github.com/stretchr/testify/suite"
 )
 

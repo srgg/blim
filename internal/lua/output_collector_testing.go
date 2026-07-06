@@ -15,7 +15,7 @@ import (
 	"time"
 
 	"github.com/hedzr/go-ringbuf/v2/mpmc"
-	"github.com/srg/blim/internal/groutine"
+	"github.com/srgg/blim/internal/groutine"
 )
 
 // LuaOutputCollectorMetrics provides lock-free metrics tracking for LuaOutputCollector

@@ -14,8 +14,8 @@ import (
 
 	"github.com/aarzilli/golua/lua"
 	"github.com/sirupsen/logrus"
-	blim "github.com/srg/blim"
-	"github.com/srg/blim/internal/device"
+	blim "github.com/srgg/blim"
+	"github.com/srgg/blim/internal/device"
 )
 
 const (
@@ -486,10 +486,10 @@ func (api *LuaAPI) registerBlimAPI() {
 		// Set global '_blim_internal' variable
 		L.SetGlobal("_blim_internal")
 
-		// Preload the blim.lua scripts (creates global ble and blim)
+		// Preload the embedded Lua libraries (creates global blim + ffi_buffer).
+		// PreloadLuaLibrary panics on failure — these are go:embed assets, so a
+		// failure means the binary is broken (see its doc comment).
 		api.LuaEngine.PreloadLuaLibrary(blim.BlimLuaScript, "blim", "blim.lua")
-
-		// Preload
 		api.LuaEngine.PreloadLuaLibrary(blim.FfiBufferLibLuaScript, "ffi_buffer", "ffi.buffer.lua")
 
 		return nil
@@ -757,6 +757,7 @@ func (api *LuaAPI) parseSubscriptionTable(L *lua.State, tableIndex int) (*LuaSub
 
 	// Parse DrainDuration (milliseconds)
 	L.PushString("DrainDuration")
+	L.GetTable(tableIndex)
 	if L.IsNumber(-1) {
 		config.DrainDuration = L.ToInteger(-1)
 	} else {
@@ -1452,6 +1453,14 @@ func (api *LuaAPI) registerSleepFunction(L *lua.State) {
 	})
 	L.SetTable(-3)
 }
+
+// NOTE: blim.pcall is deliberately NOT a Go-registered function (it lives in
+// blim.lua as LuaJIT's native pcall). golua raises errors as Go panics
+// (RaiseError, golua_default_msghandler) that are recoverable ONLY at the
+// outermost golua entry point (DoString/Call): recovering them in a nested
+// Go function abandons live LuaJIT C frames and leaves the state's cframe
+// chain dangling — SIGSEGV on the next throw or lua_close. Do not reintroduce
+// a Go-side protected call unless golua's error architecture changes.
 
 // pushDescriptor pushes a descriptor object onto the Lua stack as a table.
 // Creates a table with uuid, handle, index, name, value, and parsed_value fields.

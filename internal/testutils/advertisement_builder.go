@@ -7,9 +7,9 @@ import (
 	"fmt"
 
 	"github.com/sirupsen/logrus"
-	"github.com/srg/blim/internal/device"
-	goble "github.com/srg/blim/internal/device/go-ble"
-	devicemocks "github.com/srg/blim/internal/testutils/mocks/device"
+	"github.com/srgg/blim/internal/device"
+	goble "github.com/srgg/blim/internal/device/go-ble"
+	devicemocks "github.com/srgg/blim/internal/testutils/mocks/device"
 )
 
 // AdvertisementBuilder builds mocked BLE advertisements for testing.

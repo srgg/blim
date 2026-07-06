@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"github.com/dop251/goja"
-	"github.com/srg/blim/internal/device"
-	"github.com/srg/blim/internal/testutils"
+	"github.com/srgg/blim/internal/device"
+	"github.com/srgg/blim/internal/testutils"
 )
 
 // SubscriptionWrapper JS helper for a subscription with a separate collector

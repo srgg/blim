@@ -75,7 +75,7 @@ import (
 	"github.com/creack/pty"
 	"github.com/sirupsen/logrus"
 	"github.com/smallnest/ringbuffer"
-	"github.com/srg/blim/internal/groutine"
+	"github.com/srgg/blim/internal/groutine"
 	"golang.org/x/sys/unix"
 	"golang.org/x/term"
 )
@@ -551,4 +551,3 @@ func createPTY() (master *os.File, slave *os.File, err error) {
 
 	return master, slave, nil
 }
-

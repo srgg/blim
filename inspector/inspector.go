@@ -1,3 +1,9 @@
+// Package inspector connects to a Bluetooth Low Energy device and enumerates
+// its GATT services, characteristics, and descriptors.
+//
+// InspectDevice handles the connect/inspect/disconnect lifecycle and returns a
+// caller-defined result built from the discovered attributes. The package is
+// importable as a library and also backs the "blim inspect" CLI command.
 package inspector
 
 import (
@@ -5,8 +11,8 @@ import (
 	"time"
 
 	"github.com/sirupsen/logrus"
-	"github.com/srg/blim/internal/device"
-	goble "github.com/srg/blim/internal/device/go-ble"
+	"github.com/srgg/blim/internal/device"
+	goble "github.com/srgg/blim/internal/device/go-ble"
 )
 
 // ProgressCallback is called when the inspection phase changes

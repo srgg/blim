@@ -8,7 +8,7 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
-	"github.com/srg/blim/internal/testutils"
+	"github.com/srgg/blim/internal/testutils"
 )
 
 // Test device addresses for consistent mock device identification

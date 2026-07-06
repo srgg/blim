@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/sirupsen/logrus"
-	"github.com/srg/blim/internal/groutine"
+	"github.com/srgg/blim/internal/groutine"
 )
 
 // OutputDrainer continuously drains a Lua output channel to stdout/stderr writers.

@@ -19,7 +19,7 @@ import (
 
 	"github.com/sirupsen/logrus"
 	"github.com/smallnest/ringbuffer"
-	"github.com/srg/blim/internal/groutine"
+	"github.com/srgg/blim/internal/groutine"
 	"golang.org/x/sys/unix"
 )
 

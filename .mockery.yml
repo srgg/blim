@@ -16,7 +16,7 @@ packages:
         config:
           filename: "mock_BleClient.go"
 
-  github.com/srg/blim/internal/device:
+  github.com/srgg/blim/internal/device:
     config:
       dir: "internal/testutils/mocks/device"
     interfaces:
