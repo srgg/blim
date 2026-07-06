@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/srg/blim/internal/device"
+	"github.com/srgg/blim/internal/device"
 )
 
 type DeviceJSONFull struct {

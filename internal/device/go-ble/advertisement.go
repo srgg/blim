@@ -2,7 +2,7 @@ package goble
 
 import (
 	"github.com/go-ble/ble"
-	"github.com/srg/blim/internal/device"
+	"github.com/srgg/blim/internal/device"
 )
 
 // BLEAdvertisement wraps ble.Advertisement to implement device.Advertisement interface

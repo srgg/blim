@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/hedzr/go-ringbuf/v2/mpmc"
-	"github.com/srg/blim/internal/device"
+	"github.com/srgg/blim/internal/device"
 )
 
 // SubscriptionRecordCollector captures subscription records for test verification.

@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/srg/blim/internal/groutine"
+	"github.com/srgg/blim/internal/groutine"
 )
 
 // =============================================================================

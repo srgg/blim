@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/srg/blim/internal/device"
-	"github.com/srg/blim/internal/devicefactory"
-	"github.com/srg/blim/internal/lua"
-	"github.com/srg/blim/internal/testutils"
+	"github.com/srgg/blim/internal/device"
+	"github.com/srgg/blim/internal/devicefactory"
+	"github.com/srgg/blim/internal/lua"
+	"github.com/srgg/blim/internal/testutils"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 )
@@ -956,19 +956,9 @@ func (suite *BridgeTestSuite) TestRunCliBridgeIntegration() {
 		// GOAL: Verify bridge exits cleanly when the Lua script is blocked on io.read() and context is cancelled
 		//
 		// TEST SCENARIO: Start bridge with io.read() script → cancel context → close pipe to send EOF → bridge exits within maxShutdownDuration
-		//
-		// Mechanism: Create a pipe, temporarily swap os.Stdin, close writer to send EOF and unblock io.read()
 
-		// Create pipe to replace stdin - closing writer sends EOF to unblock io.read()
-		pipeReader, pipeWriter, err := os.Pipe()
-		suite.Require().NoError(err, "Failed to create pipe")
-		defer pipeReader.Close()
-		defer pipeWriter.Close()
-
-		// Swap os.Stdin with pipe reader (restore after test)
-		originalStdin := os.Stdin
-		os.Stdin = pipeReader
-		defer func() { os.Stdin = originalStdin }()
+		// Replace stdin with a pipe - closing the writer sends EOF to unblock io.read()
+		pipeWriter := suite.GivenStdinPipe()
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()

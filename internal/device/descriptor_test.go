@@ -5,7 +5,7 @@ package device_test
 import (
 	"testing"
 
-	"github.com/srg/blim/internal/device"
+	"github.com/srgg/blim/internal/device"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

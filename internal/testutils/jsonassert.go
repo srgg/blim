@@ -9,7 +9,7 @@ import (
 	"testing"
 
 	"github.com/mcuadros/go-defaults"
-	"github.com/srg/blim/internal/device"
+	"github.com/srgg/blim/internal/device"
 	"github.com/yudai/gojsondiff"
 	"github.com/yudai/gojsondiff/formatter"
 )

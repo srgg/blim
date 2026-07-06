@@ -9,10 +9,10 @@ import (
 
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
-	"github.com/srg/blim/internal/device"
-	"github.com/srg/blim/internal/devicefactory"
-	"github.com/srg/blim/internal/testutils"
-	"github.com/srg/blim/scanner"
+	"github.com/srgg/blim/internal/device"
+	"github.com/srgg/blim/internal/devicefactory"
+	"github.com/srgg/blim/internal/testutils"
+	"github.com/srgg/blim/scanner"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
 )

@@ -202,7 +202,13 @@ func (s *SecureModuleLoader) Register(engine *LuaEngine) {
 			if L.IsFunction(-1) {
 				// Call the preload function with moduleName as argument
 				L.PushString(moduleName)
-				L.Call(1, 1) // 1 arg, 1 result
+				if err := L.Call(1, 1); err != nil {
+					// On failure Call leaves the error message where the result would
+					// be; without this check it would get cached as the module value.
+					L.Pop(3) // Pop error message, preload, package
+					L.RaiseError(fmt.Sprintf("require('%s'): %s", moduleName, err.Error()))
+					return 0
+				}
 
 				// Cache in package.loaded
 				L.GetGlobal("package")

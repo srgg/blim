@@ -17,8 +17,8 @@ import (
 
 	"github.com/cornelk/hashmap"
 	"github.com/sirupsen/logrus"
-	"github.com/srg/blim/internal/device"
-	"github.com/srg/blim/internal/testutils"
+	"github.com/srgg/blim/internal/device"
+	"github.com/srgg/blim/internal/testutils"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 )

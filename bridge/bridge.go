@@ -1,3 +1,11 @@
+// Package bridge relays a Bluetooth Low Energy device to a local PTY, running a
+// Lua script that mediates traffic between the BLE characteristics and the
+// pseudo-terminal.
+//
+// RunDeviceBridge is the generic library entry point (connect, set up the PTY,
+// invoke a caller callback); RunCliBridge wraps it for the "blim bridge" CLI
+// command, executing a script with stdout/stderr streaming. The package is
+// importable as a library.
 package bridge
 
 import (
@@ -9,11 +17,11 @@ import (
 	"time"
 
 	"github.com/sirupsen/logrus"
-	"github.com/srg/blim/internal/device"
-	"github.com/srg/blim/internal/devicefactory"
-	"github.com/srg/blim/internal/groutine"
-	"github.com/srg/blim/internal/lua"
-	"github.com/srg/blim/internal/ptyio"
+	"github.com/srgg/blim/internal/device"
+	"github.com/srgg/blim/internal/devicefactory"
+	"github.com/srgg/blim/internal/groutine"
+	"github.com/srgg/blim/internal/lua"
+	"github.com/srgg/blim/internal/ptyio"
 )
 
 const (
@@ -282,7 +290,7 @@ func RunDeviceBridge[R any](
 type CLIBridgeConfig struct {
 	DeviceAddress  string
 	ConnectTimeout time.Duration
-	Symlink        string // Create a symlink to the PTY device (e.g., /tmp/ble-device)")
+	Symlink        string // Create a symlink to the PTY device (e.g., /tmp/ble-device)
 
 	ScriptContent string
 	ScriptArgs    map[string]string
@@ -293,12 +301,17 @@ type CLIBridgeConfig struct {
 
 	CharacteristicReadTimeout  time.Duration // Timeout for characteristic read operations
 	CharacteristicWriteTimeout time.Duration // Timeout for characteristic write operations
-	DescriptorReadTimeout      time.Duration // Timeout for reading descriptor values (default: 2s if unset, 0 to skip descriptor reads)")
+	DescriptorReadTimeout      time.Duration // Timeout for reading descriptor values (default: 2s if unset, 0 to skip descriptor reads)
 
 	Logger  *logrus.Logger
 	Factory devicefactory.BridgeFactory // Factory for creating bridge components (nil = use default)
 }
 
+// RunCliBridge runs a device bridge for the CLI: it connects to the device in
+// opts, executes opts.ScriptContent against the bridge, and streams the script's
+// output to opts.Stdout/opts.Stderr. It blocks until the context is canceled,
+// the device disconnects, or the script finishes, reporting progress through
+// progressCallback. It is a thin CLI-oriented wrapper over RunDeviceBridge.
 func RunCliBridge(ctx context.Context, progressCallback ProgressCallback, opts CLIBridgeConfig) error {
 	// Bridge callback - executes the Lua script with output streaming.
 	// The ctx parameter is bridgeCtx from RunDeviceBridge, which gets cancelled on disconnect.

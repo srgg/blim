@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/srg/blim/internal/device"
+	"github.com/srgg/blim/internal/device"
 )
 
 // doResolveTarget resolves a characteristic or descriptor from various input combinations.

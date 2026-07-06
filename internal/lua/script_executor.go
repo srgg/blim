@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/sirupsen/logrus"
-	"github.com/srg/blim/internal/device"
+	"github.com/srgg/blim/internal/device"
 )
 
 // ScriptOptions holds configuration for Lua script execution.

@@ -4,7 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 
-	"github.com/srg/blim/internal/bledb"
+	"github.com/srgg/blim/internal/bledb"
 )
 
 // Well-known GATT characteristic UUIDs (16-bit short form, normalized without dashes)

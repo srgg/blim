@@ -8,7 +8,7 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/srg/blim/internal/testutils"
+	"github.com/srgg/blim/internal/testutils"
 	"github.com/stretchr/testify/require"
 	suitelib "github.com/stretchr/testify/suite"
 )

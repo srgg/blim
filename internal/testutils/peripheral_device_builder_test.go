@@ -9,8 +9,8 @@ import (
 	"time"
 
 	blelib "github.com/go-ble/ble"
-	"github.com/srg/blim/internal/device"
-	devicemocks "github.com/srg/blim/internal/testutils/mocks/device"
+	"github.com/srgg/blim/internal/device"
+	devicemocks "github.com/srgg/blim/internal/testutils/mocks/device"
 	"github.com/stretchr/testify/suite"
 )
 

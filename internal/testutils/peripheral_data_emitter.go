@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/srg/blim/internal/device"
-	goble "github.com/srg/blim/internal/device/go-ble"
+	"github.com/srgg/blim/internal/device"
+	goble "github.com/srgg/blim/internal/device/go-ble"
 	orderedmap "github.com/wk8/go-ordered-map/v2"
 )
 

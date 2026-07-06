@@ -16,9 +16,9 @@ import (
 
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
-	"github.com/srg/blim/internal/device"
-	"github.com/srg/blim/internal/groutine"
-	"github.com/srg/blim/scanner"
+	"github.com/srgg/blim/internal/device"
+	"github.com/srgg/blim/internal/groutine"
+	"github.com/srgg/blim/scanner"
 )
 
 // scanCmd represents the scan command

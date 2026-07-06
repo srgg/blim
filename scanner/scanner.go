@@ -1,3 +1,9 @@
+// Package scanner discovers nearby Bluetooth Low Energy devices.
+//
+// Scan performs a bounded discovery pass and returns the devices found, keyed
+// by address; Events exposes a live stream of discovery events during the scan
+// (see Events for its overwrite-oldest buffering). The package is importable
+// as a library and also backs the "blim scan" CLI command.
 package scanner
 
 import (
@@ -8,9 +14,9 @@ import (
 
 	"github.com/cornelk/hashmap"
 	"github.com/sirupsen/logrus"
-	"github.com/srg/blim/internal/device"
-	"github.com/srg/blim/internal/devicefactory"
-	"github.com/srg/blim/internal/lua"
+	"github.com/srgg/blim/internal/device"
+	"github.com/srgg/blim/internal/devicefactory"
+	"github.com/srgg/blim/internal/lua"
 )
 
 // ProgressCallback is called when the scan phase changes
@@ -30,10 +36,17 @@ type DeviceEvent struct {
 	Timestamp  time.Time // When this event occurred
 }
 
+// DeviceEntry is a discovered device as returned by Scan, keyed by address.
 type DeviceEntry struct {
-	Device   device.DeviceInfo
+	// Device is the read-only view of the device (identity, RSSI, advertised
+	// data). It is the same underlying object as the internal handle, exposed
+	// as the immutable DeviceInfo interface so callers cannot connect or mutate it.
+	Device device.DeviceInfo
+	// device is the scanner's full, mutable handle for the same device; kept
+	// unexported so it can be refreshed as new advertisements arrive without
+	// widening the public surface.
 	device   device.Device
-	LastSeen time.Time
+	LastSeen time.Time // wall-clock time this device was last observed
 }
 
 // Scanner handles BLE device discovery
@@ -223,7 +236,14 @@ func (s *Scanner) makeDeviceList() []DeviceEntry {
 	return devs
 }
 
-// Events return a read-only channel of device events
+// Events returns a read-only channel of device events emitted during a scan.
+//
+// The channel is backed by a bounded ring buffer (capacity 100) with
+// overwrite-oldest semantics: the scanner never blocks on a slow consumer, so
+// if events are produced faster than they are read, the oldest undelivered
+// events are silently dropped. Consumers that must observe every event should
+// read the channel promptly; those that only need the final device set can use
+// Scan's returned map instead.
 func (s *Scanner) Events() <-chan DeviceEvent {
 	return s.events.C()
 }

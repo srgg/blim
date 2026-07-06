@@ -12,7 +12,7 @@ import (
 	"unicode"
 
 	"github.com/sirupsen/logrus"
-	"github.com/srg/blim/internal/device"
+	"github.com/srgg/blim/internal/device"
 )
 
 const (

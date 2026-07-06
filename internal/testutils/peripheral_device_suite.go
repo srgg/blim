@@ -11,9 +11,9 @@ import (
 
 	blelib "github.com/go-ble/ble"
 	"github.com/sirupsen/logrus"
-	"github.com/srg/blim/internal/device"
+	"github.com/srgg/blim/internal/device"
 
-	goble "github.com/srg/blim/internal/device/go-ble"
+	goble "github.com/srgg/blim/internal/device/go-ble"
 	"github.com/stretchr/testify/suite"
 )
 

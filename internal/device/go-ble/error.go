@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/srg/blim/internal/device"
+	"github.com/srgg/blim/internal/device"
 )
 
 // NormalizeError maps known go-ble error strings to structured ConnectionError types.

@@ -5,8 +5,8 @@ package lua
 import (
 	"context"
 
-	"github.com/srg/blim/internal/device"
-	"github.com/srg/blim/internal/testutils"
+	"github.com/srgg/blim/internal/device"
+	"github.com/srgg/blim/internal/testutils"
 )
 
 type LuaApiSuite struct {

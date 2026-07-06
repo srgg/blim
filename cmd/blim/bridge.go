@@ -9,10 +9,10 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/srg/blim"
-	"github.com/srg/blim/bridge"
-	"github.com/srg/blim/internal/device"
-	"github.com/srg/blim/internal/lua"
+	"github.com/srgg/blim"
+	"github.com/srgg/blim/bridge"
+	"github.com/srgg/blim/internal/device"
+	"github.com/srgg/blim/internal/lua"
 )
 
 // bridgeCmd represents the bridge command

@@ -2,8 +2,8 @@ package devicefactory
 
 import (
 	"github.com/sirupsen/logrus"
-	"github.com/srg/blim/internal/device"
-	"github.com/srg/blim/internal/device/go-ble"
+	"github.com/srgg/blim/internal/device"
+	"github.com/srgg/blim/internal/device/go-ble"
 )
 
 // DeviceFactory creates device.Scanner instances for BLE scanning operations.

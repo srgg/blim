@@ -12,11 +12,11 @@ import (
 
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
-	"github.com/srg/blim"
-	"github.com/srg/blim/inspector"
-	"github.com/srg/blim/internal/device"
-	"github.com/srg/blim/internal/devicefactory"
-	"github.com/srg/blim/internal/lua"
+	"github.com/srgg/blim"
+	"github.com/srgg/blim/inspector"
+	"github.com/srgg/blim/internal/device"
+	"github.com/srgg/blim/internal/devicefactory"
+	"github.com/srgg/blim/internal/lua"
 )
 
 const (
