@@ -30,13 +30,13 @@ brew install blim
 ### Install via Go
 
 ```bash
-go install github.com/srg/blim/cmd/blim@latest
+go install github.com/srgg/blim/cmd/blim@latest
 ```
 
 ### Install as Library
 
 ```bash
-go get github.com/srg/blim
+go get github.com/srgg/blim
 ```
 
 ## Requirements
@@ -112,26 +112,34 @@ import (
     "fmt"
     "time"
 
-    "github.com/srg/blim/scanner"
+    "github.com/sirupsen/logrus"
+    "github.com/srgg/blim/scanner"
 )
 
 func main() {
     // Create a scanner
-    s := scanner.NewScanner()
+    s, err := scanner.NewScanner(logrus.New())
+    if err != nil {
+        panic(err)
+    }
 
     // Scan for 10 seconds
     ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
     defer cancel()
 
-    devices, err := s.Scan(ctx, false, func(adv scanner.Advertisement) {
-        fmt.Printf("Found: %s (%s)\n", adv.LocalName(), adv.Addr())
+    opts := scanner.DefaultScanOptions()
+    devices, err := s.Scan(ctx, opts, func(phase string) {
+        fmt.Println("scan:", phase)
     })
-
     if err != nil {
         panic(err)
     }
 
+    // Scan returns a map keyed by device address.
     fmt.Printf("Discovered %d devices\n", len(devices))
+    for addr, entry := range devices {
+        fmt.Printf("  %s  %q  %d dBm\n", addr, entry.Device.Name(), entry.Device.RSSI())
+    }
 }
 ```
 
@@ -140,7 +148,7 @@ func main() {
 Clone the repository and build:
 
 ```bash
-git clone https://github.com/srg/blim.git
+git clone https://github.com/srgg/blim.git
 cd blim
 make build
 ```
@@ -176,7 +184,6 @@ blim/
 │   ├── devicefactory/ # Device factory for dependency injection
 │   └── testutils/     # Testing utilities and mock builders
 ├── examples/          # Example Lua scripts for bridging and inspection
-├── docs/              # Documentation
 └── README.md
 ```
 
@@ -186,6 +193,38 @@ See the [examples/](examples/) directory for:
 - **bridge.lua** - Basic BLE-to-serial bridging
 - **inspect.lua** - Device inspection and discovery
 - **motioncal-bridge.lua** - IMU sensor data bridging
+
+### Lua API notes
+
+**Full API reference:** [internal/lua/README.md](internal/lua/README.md) documents
+every `blim.*` function (device info, subscriptions, PTY bridge, `blim.term`,
+`blim.pcall`, binary helpers) with examples.
+
+The scripting sandbox runs on LuaJIT with a few deliberate differences from
+stock Lua that script authors should know:
+
+- **`blim.pcall(f, ...)`** — use this instead of the standard `pcall`, which is
+  removed from the sandbox. It catches errors raised by Lua code and C built-ins
+  (`error()`, `ffi.cdef`, ...). **Limitation:** errors raised by Go-backed API
+  functions (`require`, `blim.subscribe`, `blim.characteristic`, ...) are *not*
+  catchable and abort the script by design — the sandbox cannot safely unwind a
+  Lua-level catch across Go call frames. Handle those via the `nil, err` return
+  values that the Go-backed functions already provide, not `blim.pcall`.
+
+- **`blim.term`** — terminal helpers for interactive bridge scripts (raw mode +
+  single-keypress input):
+  - `blim.term.enable_raw()` → `true` | `nil, err` (idempotent; fails when stdin
+    is not a TTY)
+  - `blim.term.disable_raw()` — restore the terminal (idempotent)
+  - `blim.term.read_char(wait_ms?)` → `char` | `nil` | `nil, msg, code`
+    (io.read semantics). With no argument it is non-blocking; with `wait_ms` it
+    waits up to that long, yielding via `blim.sleep` so BLE callbacks keep
+    flowing. A bare `nil` means "no key yet"; a `nil, msg, code` triple is a
+    terminal condition — `code == blim.term.EOF` means stdin was closed
+    (interactive loops must exit), any other `code` is the read `errno`.
+
+  See [examples/vehicle-control-bridge.lua](examples/vehicle-control-bridge.lua)
+  for a full interactive control panel using these.
 
 ## Contributing
 
@@ -197,6 +236,21 @@ Contributions are welcome! Please:
 4. Push to the branch (`git push origin feature/amazing-feature`)
 5. Open a Pull Request
 
+## Releasing
+
+Releases are fully automated via [GitHub Actions](.github/workflows/release.yaml). To cut a release, push a version tag:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The workflow then:
+
+1. Builds `blim` for macOS arm64 with statically linked LuaJIT (verifies no dynamic LuaJIT dependency via `otool`)
+2. Creates a GitHub Release with the `blim_darwin_arm64.tar.gz` archive, checksums, and auto-generated release notes
+3. Updates the Homebrew formula in the [srgg/homebrew-blim](https://github.com/srgg/homebrew-blim) tap (requires the `HOMEBREW_TAP_TOKEN` repository secret)
+
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
@@ -204,6 +258,6 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## Acknowledgments
 
 Built with:
-- [go-ble/ble](https://github.com/go-ble/ble) - Cross-platform BLE library
-- [gopher-lua](https://github.com/yuin/gopher-lua) - Lua VM in Go
+- [go-ble/ble](https://github.com/go-ble/ble) - Cross-platform BLE library (built against the maintained [srgg/go-ble](https://github.com/srgg/go-ble) fork, which adds a macOS mid-scan Bluetooth-state fix absent from the dormant upstream)
+- [golua](https://github.com/aarzilli/golua) - Go bindings for Lua, statically linked against LuaJIT
 - [testify](https://github.com/stretchr/testify) - Testing toolkit
