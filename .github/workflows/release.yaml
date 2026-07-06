@@ -16,32 +16,10 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-go@v5
+      - name: Set up Go + LuaJIT (static)
+        uses: ./.github/actions/setup-luajit
         with:
-          go-version: '1.24'
-
-      - name: Install LuaJIT
-        run: brew install luajit
-
-      - name: Configure LuaJIT paths (static linking)
-        run: |
-          LUAJIT_PREFIX=$(brew --prefix luajit)
-
-          # Create static pkg-config file to force static linking
-          mkdir -p /tmp/pkgconfig
-          cat > /tmp/pkgconfig/lua5.1.pc << EOF
-          prefix=${LUAJIT_PREFIX}
-          libdir=\${prefix}/lib
-          includedir=\${prefix}/include/luajit-2.1
-
-          Name: LuaJIT
-          Description: LuaJIT (static)
-          Version: 2.1
-          Libs: \${libdir}/libluajit-5.1.a
-          Cflags: -I\${includedir}
-          EOF
-
-          echo "PKG_CONFIG_PATH=/tmp/pkgconfig" >> $GITHUB_ENV
+          static-linking: 'true'
 
       - name: Build
         run: |

@@ -1,0 +1,42 @@
+name: CI
+
+# Runs on pull requests and on pushes to main. Feature-branch coverage comes via
+# the pull_request trigger, so we don't also run on every branch push (avoids
+# duplicate runs on PR branches).
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go + LuaJIT
+        uses: ./.github/actions/setup-luajit
+
+      - name: Check formatting
+        run: |
+          unformatted=$(gofmt -l $(git ls-files '*.go'))
+          if [ -n "$unformatted" ]; then
+            echo "The following files are not gofmt-clean:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      # Mocks (internal/testutils/mocks) and *_depend_test.go are .gitignore'd and
+      # must be regenerated before the test-tagged code will compile.
+      - name: Generate code
+        run: make generate
+
+      - name: Vet
+        run: go vet -tags "test luajit" ./...
+
+      - name: Test (race detector, no cache)
+        run: go test -tags "test luajit" -race -count=1 -timeout 600s ./...
