@@ -8,11 +8,13 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"github.com/srgg/blim"
 	"github.com/srgg/blim/bridge"
 	"github.com/srgg/blim/internal/device"
 	"github.com/srgg/blim/internal/lua"
+	"golang.org/x/term"
 )
 
 // bridgeCmd represents the bridge command
@@ -63,6 +65,10 @@ func init() {
 	bridgeCmd.Flags().StringVar(&bridgeSymlink, "symlink", "", "Create a symlink to the PTY device (e.g., /tmp/ble-device)")
 }
 
+// runBridge is the cobra entry point. It owns the process-level wiring — the cancellation context
+// and the SIGINT/SIGTERM handler — and delegates the actual work to runBridgeCtx. Keeping the ctx
+// creation here (and injecting it into runBridgeCtx) lets tests drive cancellation directly, without
+// sending a process-global signal.
 func runBridge(cmd *cobra.Command, args []string) error {
 	// Configure logger based on --log-level and --verbose flags
 	logger, err := configureLogger(cmd, "verbose")
@@ -73,15 +79,6 @@ func runBridge(cmd *cobra.Command, args []string) error {
 	// All arguments validated - don't show usage on runtime errors
 	cmd.SilenceUsage = true
 
-	deviceAddress := args[0]
-
-	// Validate and normalize service UUID
-	serviceUUIDs, err := device.ValidateUUID(bridgeServiceUUID)
-	if err != nil {
-		return fmt.Errorf("invalid service UUID: %w", err)
-	}
-	serviceUUID := serviceUUIDs[0]
-
 	// Create context for graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -90,17 +87,8 @@ func runBridge(cmd *cobra.Command, args []string) error {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
-	//// Set up stdin relay for clean shutdown of Lua scripts using blocking reads
-	//stdinRelay, err := ptyio.NewPTYRelay(logger)
-	//if err != nil {
-	//	return err
-	//}
-
 	exitProgress := NewProgressPrinter("Shutting down", "Cleaning up", "Done")
-	defer func() {
-		exitProgress.Stop()
-		//stdinRelay.Cleanup()
-	}()
+	defer exitProgress.Stop()
 
 	go func() {
 		defer func() {
@@ -113,10 +101,27 @@ func runBridge(cmd *cobra.Command, args []string) error {
 		exitProgress.Start()
 		exitProgress.Callback()("Closing connections")
 		logger.Info("Received interrupt signal, shutting down...")
-		//_ = stdinRelay.Close()
 		exitProgress.Callback()("Stopping script")
 		cancel()
 	}()
+
+	return runBridgeCtx(ctx, logger, args[0])
+}
+
+// runBridgeCtx runs the bridge under an injectable context. It restores the terminal on exit
+// regardless of how the run ended: a Lua script may switch the terminal to raw mode via
+// blim.term.enable_raw, and cancellation can abort the script before blim.term.disable_raw runs
+// (issue #4), so the deferred guardTerminal puts the user's terminal back.
+func runBridgeCtx(ctx context.Context, logger *logrus.Logger, deviceAddress string) error {
+	// Validate and normalize service UUID
+	serviceUUIDs, err := device.ValidateUUID(bridgeServiceUUID)
+	if err != nil {
+		return fmt.Errorf("invalid service UUID: %w", err)
+	}
+	serviceUUID := serviceUUIDs[0]
+
+	// Restore the terminal on exit even if a script left it in raw mode (issue #4).
+	defer guardTerminal(int(os.Stdin.Fd()), logger)()
 
 	// Load script content before creating the callback
 	var scriptContent string
@@ -152,7 +157,7 @@ func runBridge(cmd *cobra.Command, args []string) error {
 	progress.Start()
 	defer progress.Stop()
 
-	err = bridge.RunCliBridge(ctx, progress.Callback(), bridge.CLIBridgeConfig{
+	return bridge.RunCliBridge(ctx, progress.Callback(), bridge.CLIBridgeConfig{
 		DeviceAddress:  deviceAddress,
 		ConnectTimeout: bridgeConnectTimeout,
 		Symlink:        bridgeSymlink,
@@ -169,6 +174,26 @@ func runBridge(cmd *cobra.Command, args []string) error {
 		CharacteristicWriteTimeout: bridgeCharacteristicWriteTimeout,
 		DescriptorReadTimeout:      bridgeDescriptorReadTimeout,
 	})
+}
 
-	return err
+// guardTerminal snapshots the terminal connected to fd and returns a function that restores it on
+// exit. A Lua script may switch the terminal to raw mode via blim.term.enable_raw; if cancellation
+// aborts the script before blim.term.disable_raw runs (issue #4), the deferred restore puts the
+// user's terminal back into its original mode — the way ssh does. No-op when fd is not a terminal
+// (e.g. piped stdin). The snapshot is taken now (before the script can change the mode); the restore
+// runs on the returned func — safe to defer, and idempotent if the script already restored the mode.
+func guardTerminal(fd int, logger *logrus.Logger) func() {
+	if !term.IsTerminal(fd) {
+		return func() {}
+	}
+	state, err := term.GetState(fd)
+	if err != nil {
+		logger.WithError(err).Debug("could not snapshot terminal state; will not restore on exit")
+		return func() {}
+	}
+	return func() {
+		if err := term.Restore(fd, state); err != nil {
+			logger.WithError(err).Warn("failed to restore terminal state on exit")
+		}
+	}
 }

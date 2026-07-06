@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"runtime/debug"
+	"runtime/pprof"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -29,6 +30,21 @@ const (
 	// When capacity is reached, the ring buffer overwrites the oldest records (output loss).
 	// Increase this value for scripts with high-frequency output to prevent record loss.
 	DefaultOutputChannelCapacity int = 100
+
+	// DefaultScriptCancellationTimeout bounds how long safeExecuteScript waits for the script
+	// goroutine to exit after the context is cancelled before it gives up and returns a diagnostic
+	// error. A script with no cancellable boundary (e.g. a pure JIT/FFI loop that never calls a
+	// blocking API) cannot be stopped cooperatively; this prevents an unbounded hang (issue #4).
+	DefaultScriptCancellationTimeout = 5 * time.Second
+)
+
+// Package-level errors.
+var (
+	// ErrScriptCancellationTimeout is returned by ExecuteScript when a script does not stop within
+	// the cancellation grace period — it has no cancellable boundary (e.g. a pure JIT/FFI loop that
+	// never calls a blocking API) and could not be stopped cooperatively; the script goroutine stays
+	// parked in cgo until process exit. Detect with errors.Is.
+	ErrScriptCancellationTimeout = errors.New("script did not terminate within the cancellation grace period")
 )
 
 // LuaOutputRecord represents a single output record from Lua script execution
@@ -160,6 +176,10 @@ type LuaEngine struct {
 	// Lives on LuaEngine (owner of the state and mutex) so LuaEngine-registered primitives like
 	// io.read can consult it without depending upward on LuaAPI.
 	inCallbackCount atomic.Int32
+
+	// scriptCancellationTimeout bounds the post-cancellation wait for the script goroutine to exit
+	// (see DefaultScriptCancellationTimeout). Configurable so tests can shorten it.
+	scriptCancellationTimeout time.Duration
 }
 
 // enterCallback marks that a callback's L.Call() is starting on the shared state. MUST be paired
@@ -202,9 +222,10 @@ func NewLuaEngine(logger *logrus.Logger) *LuaEngine {
 // Use a larger capacity for scripts with high-frequency output to prevent record loss.
 func NewLuaEngineWithOutputChannelCapacity(logger *logrus.Logger, capacity int) *LuaEngine {
 	engine := &LuaEngine{
-		logger:     logger,
-		stateMutex: NewFairLock(),
-		outputChan: NewRingChannel[LuaOutputRecord](capacity),
+		logger:                    logger,
+		stateMutex:                NewFairLock(),
+		outputChan:                NewRingChannel[LuaOutputRecord](capacity),
+		scriptCancellationTimeout: DefaultScriptCancellationTimeout,
 	}
 
 	engine.Reset()
@@ -829,13 +850,23 @@ func (e *LuaEngine) safeExecuteScript(ctx context.Context, script string) error 
 		e.logger.Debug("[safeExecuteScript] context cancelled, invoking shutdown hooks...")
 		e.invokeShutdownHooks()
 
-		// Wait for the script execution goroutine (L.DoString) to finish before returning.
-		// The debug hook will raise an error causing L.DoString to return,
-		// ensuring the goroutine exits cleanly before we proceed with shutdown.
+		// Wait for the script goroutine (L.DoString) to finish, but BOUND the wait. With the
+		// deterministic cancellation of blocking APIs (blim.sleep raises on ctx.Done) the goroutine
+		// returns almost immediately. A script with no cancellable boundary (a pure JIT/FFI loop that
+		// never calls a blocking API) can never be stopped cooperatively — the LuaJIT count hook does
+		// not fire inside compiled traces. Rather than hang forever (issue #4), give up after
+		// scriptCancellationTimeout, dump goroutines for diagnosis, and return. The abandoned
+		// goroutine stays parked in cgo until process exit.
 		e.logger.Debug("[safeExecuteScript] waiting for goroutine...")
-		<-done
-		e.logger.Debug("[safeExecuteScript] goroutine finished after cancellation")
-		return context.Canceled
+		select {
+		case <-done:
+			e.logger.Debug("[safeExecuteScript] goroutine finished after cancellation")
+			return context.Canceled
+		case <-time.After(e.scriptCancellationTimeout):
+			e.logger.Errorf("[safeExecuteScript] script did not stop within %s of cancellation; dumping goroutines", e.scriptCancellationTimeout)
+			_ = pprof.Lookup("goroutine").WriteTo(os.Stderr, 2)
+			return fmt.Errorf("%w (%s)", ErrScriptCancellationTimeout, e.scriptCancellationTimeout)
+		}
 	}
 }
 

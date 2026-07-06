@@ -5,6 +5,7 @@ package lua
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -366,6 +367,49 @@ func (suite *LuaEngineTestSuite) TestExecuteScript2_ContextCancellation() {
 		suite.Error(err, "Should fail with already cancelled context")
 		suite.True(context.Canceled == err, "Should return context.Canceled")
 	})
+}
+
+// TestExecuteScript2_CancellationTimeout verifies that safeExecuteScript does not wait forever for a
+// script that ignores cancellation: after scriptCancellationTimeout it returns a diagnostic error
+// instead of hanging (issue #4 residual case — a pure JIT/FFI loop has no cancellable boundary and
+// the LuaJIT count hook never fires inside a compiled trace).
+func (suite *LuaEngineTestSuite) TestExecuteScript2_CancellationTimeout() {
+	// GOAL: The post-cancellation wait is bounded — an unstoppable script yields a timeout error
+	//       within the grace period rather than an unbounded hang.
+	//
+	// TEST SCENARIO: Script blocks ignoring the context → context cancelled → ExecuteScript returns a
+	//                grace-period error within the (shortened) timeout, well before the block finishes
+
+	e := suite.luaEngine
+	e.scriptCancellationTimeout = 150 * time.Millisecond
+
+	// Register a test-only blocker that sleeps ignoring the context. It stands in for an
+	// uncancellable JIT/FFI loop but finishes on its own, so it neither depends on JIT warmup nor
+	// leaks a goroutine forever.
+	e.DoWithState(func(L *lua.State) interface{} {
+		L.PushGoFunction(func(L *lua.State) int {
+			time.Sleep(time.Duration(L.ToInteger(1)) * time.Millisecond)
+			return 0
+		})
+		L.SetGlobal("_test_block_ignoring_cancel")
+		return nil
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(50*time.Millisecond, cancel)
+
+	// The blocker sleeps 1000ms ignoring the context; the grace timeout is 150ms.
+	err := e.ExecuteScript(ctx, `_test_block_ignoring_cancel(1000)`)
+
+	// The bounded-timeout branch is the only path that yields a grace-period timeout error, so its
+	// presence proves both facts at once: the wait was bounded (it did not block for the full 1000ms
+	// script) and the forced, ungraceful stop is diagnosable. On the unfixed code the wait is
+	// unbounded — ExecuteScript only returns after the whole block with a plain context.Canceled.
+	// Report in plain language instead of testify's opaque "does not contain" output.
+	if !errors.Is(err, ErrScriptCancellationTimeout) {
+		suite.Failf("script ignoring cancellation was not stopped after the grace period",
+			"got: %v (expected ErrScriptCancellationTimeout)", err)
+	}
 }
 
 func (suite *LuaEngineTestSuite) TestExecuteScript_BlockedFunctions() {

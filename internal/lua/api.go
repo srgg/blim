@@ -1465,22 +1465,34 @@ func (api *LuaAPI) registerSleepFunction(L *lua.State) {
 		// Get execution context for cancellation support
 		ctx := api.LuaEngine.scriptExecutionCtx
 
-		// Release mutex to allow callbacks to execute during sleep
+		// Release mutex to allow callbacks to execute during the wait.
+		// Re-lock EXPLICITLY (not via defer) before any RaiseError below: RaiseError walks the Lua
+		// stack (StackTrace -> lua_getinfo), which is unsafe while the mutex is released — it races
+		// callback goroutines on the same lua_State (the corruption class of #3). Keep the window
+		// between Unlock and Lock free of any early return or panic.
 		api.LuaEngine.stateMutex.Unlock()
-		defer api.LuaEngine.stateMutex.Lock()
-
-		// Context-aware sleep: returns early if context is cancelled
+		cancelled := false
 		if ctx != nil {
 			select {
 			case <-time.After(time.Duration(ms) * time.Millisecond):
 				// Sleep completed normally
 			case <-ctx.Done():
-				// Context cancelled - will be handled by debug hook after mutex reacquired
-				api.logger.Debug("[blim.sleep] interrupted by context cancellation")
+				cancelled = true
 			}
 		} else {
 			// Fallback to regular sleep if no context (shouldn't happen in normal usage)
 			time.Sleep(time.Duration(ms) * time.Millisecond)
+		}
+		api.LuaEngine.stateMutex.Lock()
+
+		// Deterministic cancellation (issue #4): raise here instead of relying on the debug count
+		// hook, which LuaJIT never invokes inside compiled traces — an FFI-hot loop would otherwise
+		// spin forever after Ctrl+C (blim.sleep used to just return on ctx.Done). This Go-side raise
+		// is not catchable by Lua pcall (Go-backed errors abort by design), so scripts cannot swallow
+		// it; safeExecuteScript maps the "cancelled" message to context.Canceled.
+		if cancelled {
+			api.logger.Debug("[blim.sleep] interrupted by context cancellation")
+			L.RaiseError("script execution cancelled")
 		}
 
 		return 0

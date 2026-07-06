@@ -3,6 +3,7 @@
 package lua
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"runtime"
@@ -3686,6 +3687,60 @@ func (suite *LuaApiTestSuite) TestSleepReleasesLuaStateMutex() {
 			-- Callback MUST have been invoked during sleep (proves mutex was released)
 			assert(callback_received == true, "callback MUST be invoked during blim.sleep() (internal lua state mutex must be released durign sleep)")
 		`)
+}
+
+// TestSleepRaisesOnContextCancellation verifies that a context cancellation during blim.sleep
+// deterministically ABORTS the script (blim.sleep raises the cancellation error) rather than
+// returning normally. Returning normally is what let a busy loop spin forever after Ctrl+C when
+// the LuaJIT count hook never fired inside a compiled FFI trace (issue #4).
+func (suite *LuaApiTestSuite) TestSleepRaisesOnContextCancellation() {
+	// GOAL: Verify blim.sleep raises on ctx cancellation so cancellation is deterministic at the API
+	//       boundary, independent of the debug hook (which LuaJIT never invokes in compiled traces)
+	//
+	// TEST SCENARIO: Script parks in blim.sleep → context cancelled mid-sleep → sleep raises → the
+	//                statement after sleep never runs → ExecuteScript returns context.Canceled
+
+	ft := suite.Connect("1").FluentLuaTest()
+	api := ft.LuaAPI()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	// Cancel while the script is parked inside blim.sleep(5000). 100ms is far past subscription
+	// setup, so the script is guaranteed to be in the sleep when the cancel lands.
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		cancel()
+	}()
+
+	// A single self-describing "progress" marker carries both guarantees at once: it proves the
+	// script actually ran (guards against a vacuous pass) and records where it stopped. The marker
+	// values are full sentences so the expected-vs-actual diff on failure reads on its own.
+	err := api.ExecuteScript(ctx, `
+		progress = "blim.sleep canceled"
+		blim.sleep(5000)
+		progress = "blim.sleep ran past cancellation"   -- MUST be unreachable
+	`)
+
+	// Precondition (test validity, Require): the run must have ended via cancellation. err is
+	// deterministically context.Canceled on both fixed and unfixed code (ctx.Done wins the outer
+	// select before the script goroutine can signal done), so this is a sound precondition rather
+	// than the behavior under test. A failure here means the scenario never exercised cancellation.
+	suite.Require().Equal(context.Canceled, err, "precondition: execution MUST end via context cancellation")
+
+	// Read the marker directly via DoWithState rather than a second ExecuteScript: the cancelled run
+	// leaves the API in shutdown state, so a follow-up ExecuteScript would itself fail with
+	// context.Canceled. DoWithState only takes the state lock and reads — the lua_State is intact
+	// because cancellation unwound cleanly.
+	progress := api.LuaEngine.DoWithState(func(L *lua.State) interface{} {
+		L.GetGlobal("progress")
+		defer L.Pop(1)
+		return L.ToString(-1)
+	}).(string)
+
+	// Behavior under test (Assert): blim.sleep must RAISE on cancellation, aborting the script at the
+	// sleep. Expected "blim.sleep canceled"; "blim.sleep ran past cancellation" is the #4 bug; "" would
+	// mean the script never ran (test broken — but the precondition above already guards that).
+	suite.Equal("blim.sleep canceled", progress,
+		"blim.sleep must be canceled when the context is cancelled")
 }
 
 func (suite *LuaApiTestSuite) TestSubscribersDoNotCompeteForNotifications() {

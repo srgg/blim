@@ -3,12 +3,18 @@
 package main
 
 import (
+	"context"
+	"io"
+	"os"
+	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
 	"github.com/sirupsen/logrus"
 	"github.com/srgg/blim/internal/testutils"
 	"github.com/stretchr/testify/suite"
+	"golang.org/x/term"
 )
 
 // BridgeCmdTestSuite device_test the bridge command via the runBridge function
@@ -88,6 +94,62 @@ func (suite *BridgeCmdTestSuite) SetupTest() {
 	bridgeCmd.Flags().StringVar(&bridgeServiceUUID, "service", "6E400001-B5A3-F393-E0A9-E50E24DCCA9E", "BLE service UUID to bridge with")
 	bridgeCmd.Flags().DurationVar(&bridgeConnectTimeout, "connect-timeout", 30*time.Second, "Connection timeout")
 	bridgeCmd.Flags().StringVar(&bridgeLuaScript, "script", "", "Lua script file")
+}
+
+// TestBridgeRestoresTerminalOnExit verifies that the bridge restores the terminal on exit even when
+// a Lua script left it in raw mode and cancellation aborted the script before its own cleanup ran
+// (issue #4). Black-box: it drives the real runBridgeCtx over a fake-tty stdin and inspects fd 0.
+func (suite *BridgeCmdTestSuite) TestBridgeRestoresTerminalOnExit() {
+	// GOAL: runBridge restores the terminal to its pre-run (cooked) mode on exit, independent of the
+	//       script's own disable_raw — so Ctrl+C never leaves the user's shell stuck in raw mode.
+	//
+	// TEST SCENARIO: fake-tty stdin → script enables raw and never disables it → cancel mid-run →
+	//                runBridgeCtx returns → fd 0 is back to its original mode
+
+	suite.GivenStdinPTY() // fd 0 becomes a real terminal (visible to Go and LuaJIT FFI)
+
+	r := suite.Require()
+	r.True(term.IsTerminal(0), "precondition: stdin must be a terminal")
+	before, err := term.GetState(0)
+	r.NoError(err, "snapshotting the original terminal state must succeed")
+
+	// Script switches the terminal to raw and loops. It never calls disable_raw, so ONLY Go's
+	// terminal restore can bring it back.
+	scriptFile := filepath.Join(suite.T().TempDir(), "raw.lua")
+	r.NoError(os.WriteFile(scriptFile, []byte(`
+		assert(blim.term.enable_raw(), "enable_raw must succeed on the fake tty")
+		while true do blim.sleep(20) end
+	`), 0o600))
+	bridgeLuaScript = scriptFile
+
+	logger := logrus.New()
+	logger.SetOutput(io.Discard)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- runBridgeCtx(ctx, logger, TestDeviceAddress1) }()
+
+	// Let the bridge connect and the script enter raw mode.
+	time.Sleep(500 * time.Millisecond)
+	raw, err := term.GetState(0)
+	r.NoError(err)
+	r.NotEqual(before, raw, "precondition: the script must have put the terminal into raw mode")
+
+	// Cancel and wait for the run to unwind (the #4 sleep-raise makes the script abort, so
+	// runBridgeCtx returns and its deferred restore fires).
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		suite.Fail("runBridgeCtx did not return within 5s of cancellation")
+	}
+
+	after, err := term.GetState(0)
+	r.NoError(err)
+	if !reflect.DeepEqual(before, after) {
+		suite.Fail("terminal was not restored on exit",
+			"the terminal is still in a different mode than before the bridge ran — the script left it raw and Go did not restore it")
+	}
 }
 
 // TestBridgeCmdTestSuite runs the test suite
