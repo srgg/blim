@@ -8,6 +8,7 @@ import (
 	"runtime/debug"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	_ "embed"
@@ -147,6 +148,47 @@ type LuaEngine struct {
 	// Pre-reads from stdin into ring buffer, serves concurrent io.read() calls safely.
 	stdinReader     *ptyio.PrefetchFileReader
 	stdinReaderOnce sync.Once
+
+	// inCallbackCount counts active callback L.Call() frames executing on the single lua_State
+	// (BLE subscription callbacks + PTY data callbacks). Because execution is serialized by
+	// stateMutex, only one goroutine runs Lua at a time, so >0 means "the current Lua executor is
+	// inside a callback". Two consumers rely on this:
+	//   - the shutdown hook skips RaiseError while >0 (an async raise from a debug hook is unsafe);
+	//   - mutex-releasing primitives (blim.sleep, io.read) refuse to release while >0, since handing
+	//     the in-flight state to another DoWithState reenters it from another goroutine and corrupts
+	//     it (SIGSEGV in lua_getinfo — issue #3 / RFC-001).
+	// Lives on LuaEngine (owner of the state and mutex) so LuaEngine-registered primitives like
+	// io.read can consult it without depending upward on LuaAPI.
+	inCallbackCount atomic.Int32
+}
+
+// enterCallback marks that a callback's L.Call() is starting on the shared state. MUST be paired
+// with a deferred exitCallback so the count is balanced even if L.Call panics on a StackTrace crash;
+// a leaked count would make later main-loop blim.sleep/io.read wrongly appear to be in-callback.
+func (e *LuaEngine) enterCallback() { e.inCallbackCount.Add(1) }
+
+// exitCallback marks that a callback's L.Call() has finished (or unwound via panic).
+func (e *LuaEngine) exitCallback() { e.inCallbackCount.Add(-1) }
+
+// inCallback reports whether the currently executing Lua context is a callback. Valid as an
+// "in callback" indicator only because execution is serialized by stateMutex and callbacks never
+// release it (the mutex-releasing primitives are guarded by raiseIfInCallback).
+func (e *LuaEngine) inCallback() bool { return e.inCallbackCount.Load() > 0 }
+
+// raiseIfInCallback is the single chokepoint for primitives that are unsafe to run inside a
+// callback — either because they release stateMutex mid-call (blim.sleep, io.read: reentering the
+// in-flight state corrupts it) or because they block the callback goroutine while holding the state
+// (characteristic.read/write: freeze the engine and risk deadlock). When called from inside a
+// callback it raises a clean Lua error (via panic caught by the callback's protected L.Call). op is
+// the primitive's name for the message, e.g. "blim.sleep", "io.read", "characteristic.read()".
+//
+// IMPORTANT: when in a callback this PANICS (L.RaiseError) and does NOT return; callers must treat
+// it as a control-flow break. Returns normally only when not in a callback.
+func (e *LuaEngine) raiseIfInCallback(L *lua.State, op string) {
+	if e.inCallbackCount.Load() > 0 {
+		// Covers both BLE subscription and PTY data callbacks (both bump inCallbackCount).
+		L.RaiseError(op + " is not allowed inside a callback; defer to the main loop")
+	}
 }
 
 // NewLuaEngine creates a new Lua engine with full stdout/stderr capture using the default channel capacity
@@ -492,6 +534,11 @@ func (e *LuaEngine) registerIOReadContextAwareInternal() {
 				if L.GetTop() >= 1 && L.IsNumber(1) {
 					count = L.ToInteger(1)
 				}
+
+				// Reentrancy guard (issue #3): io.read releases stateMutex to block, exactly like
+				// blim.sleep. From inside a callback that would hand the in-flight lua_State to another
+				// goroutine and corrupt it. Fail deterministically before touching stdin machinery.
+				e.raiseIfInCallback(L, "io.read")
 
 				// Get execution context for cancellation support
 				ctx := e.scriptExecutionCtx
