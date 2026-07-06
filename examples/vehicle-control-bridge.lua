@@ -5,90 +5,9 @@
 --   0xFF32 Status:  Notify state changes, Read current status
 -- @module device-control-bridge
 
-local ffi = require("ffi")
+-- Terminal raw mode and single-keypress input come from blim.term
+-- (lib/blim.lua) - no per-script termios/FFI plumbing needed.
 local blim = require("blim")
-
---------------------------------------------------------------------------------
--- Terminal Raw Mode (single-keypress input without Enter)
---------------------------------------------------------------------------------
-
-ffi.cdef[[
-    // termios structure for macOS
-    typedef unsigned long tcflag_t;
-    typedef unsigned char cc_t;
-    typedef unsigned long speed_t;
-
-    struct termios {
-        tcflag_t c_iflag;
-        tcflag_t c_oflag;
-        tcflag_t c_cflag;
-        tcflag_t c_lflag;
-        cc_t c_cc[20];
-        speed_t c_ispeed;
-        speed_t c_ospeed;
-    };
-
-    int tcgetattr(int fd, struct termios *termios_p);
-    int tcsetattr(int fd, int optional_actions, const struct termios *termios_p);
-    ssize_t read(int fd, void *buf, size_t count);
-]]
-
--- termios constants for macOS
-local STDIN_FILENO = 0
-local TCSANOW = 0
-local ICANON = 0x00000100  -- Canonical mode (line buffering)
-local ECHO = 0x00000008    -- Echo input
-
--- Save original terminal settings
-local orig_termios = ffi.new("struct termios")
-local raw_termios = ffi.new("struct termios")
-local terminal_raw = false
-
---- Enable raw terminal mode (single keypress, no echo).
-local function enable_raw_mode()
-    if terminal_raw then return end
-
-    -- Get current settings
-    if ffi.C.tcgetattr(STDIN_FILENO, orig_termios) ~= 0 then
-        return false, "Failed to get terminal attributes"
-    end
-
-    -- Copy to raw settings
-    ffi.copy(raw_termios, orig_termios, ffi.sizeof("struct termios"))
-
-    -- Disable canonical mode and echo
-    raw_termios.c_lflag = bit.band(raw_termios.c_lflag, bit.bnot(bit.bor(ICANON, ECHO)))
-
-    -- Set minimum chars and timeout for read
-    raw_termios.c_cc[6] = 1   -- VMIN: minimum 1 character
-    raw_termios.c_cc[5] = 0   -- VTIME: no timeout
-
-    -- Apply raw settings
-    if ffi.C.tcsetattr(STDIN_FILENO, TCSANOW, raw_termios) ~= 0 then
-        return false, "Failed to set terminal to raw mode"
-    end
-
-    terminal_raw = true
-    return true
-end
-
---- Restore original terminal mode.
-local function disable_raw_mode()
-    if not terminal_raw then return end
-    ffi.C.tcsetattr(STDIN_FILENO, TCSANOW, orig_termios)
-    terminal_raw = false
-end
-
---- Read a single character from stdin (non-blocking style in raw mode).
--- @return Single character string, or nil on error/EOF
-local function read_char()
-    local buf = ffi.new("unsigned char[1]")
-    local n = ffi.C.read(STDIN_FILENO, buf, 1)
-    if n == 1 then
-        return string.char(buf[0])
-    end
-    return nil
-end
 
 --------------------------------------------------------------------------------
 -- Constants
@@ -517,7 +436,7 @@ end
 print_status()
 
 -- Enable raw terminal mode for single-keypress input
-local ok, err = enable_raw_mode()
+local ok, err = blim.term.enable_raw()
 if not ok then
     print("Warning: Could not enable raw mode: " .. (err or "unknown"))
     print("Falling back to line-based input (press Enter after each key)")
@@ -525,16 +444,21 @@ end
 
 -- Ensure terminal is restored on exit
 local function cleanup(silent)
-    disable_raw_mode()
+    blim.term.disable_raw()
     io.write(ANSI.RESET_ALL)  -- Reset ALL colors to terminal default
     if not silent then
         print("\nExiting...")
     end
 end
 
--- Main input loop: single keypress (no Enter needed)
+-- Main input loop: single keypress (no Enter needed). read_char(200) waits
+-- via blim.sleep, so status notifications keep arriving while idle (a
+-- blocking read would freeze BLE callbacks between keypresses); on shutdown
+-- the context-aware wait lets the engine abort the loop. When raw mode could
+-- not be enabled, the same loop degrades to line-based input: keys become
+-- available after Enter, and read_char never blocks (poll-gated).
 while true do
-    local key = read_char()
+    local key, err = blim.term.read_char(200)
     if key then
         -- Handle Ctrl+C (ASCII 3) and Ctrl+D (ASCII 4)
         if key == "\3" or key == "\4" then
@@ -549,9 +473,11 @@ while true do
             cleanup()
             break
         end
-    else
-        -- EOF or error (e.g., stdin closed on shutdown)
-        cleanup(true)  -- silent exit
+    elseif err then
+        -- terminal condition (stdin closed on shutdown, or a read error) -
+        -- restore the terminal and exit silently
+        cleanup(true)
         break
     end
+    -- bare nil: no key within the poll window - keep waiting
 end
