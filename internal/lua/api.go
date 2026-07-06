@@ -86,7 +86,8 @@ type LuaAPI struct {
 	callbackRefsMu             sync.Mutex       // Protects subscriptionCallbackRefs map
 	luaCallbackWG              sync.WaitGroup   // Tracks in-flight async callbacks for safe shutdown
 	shuttingDown               atomic.Bool      // Set during shutdown to block new callbacks before Wait()
-	inCallbackCount            atomic.Int32     // Count of active L.Call() in callbacks; >0 means unsafe to RaiseError
+	// Callback-depth tracking (inCallbackCount) lives on LuaEngine now — it is a property of the
+	// shared lua_State, and LuaEngine-registered primitives (io.read) must consult it too.
 }
 
 // NewBLEAPI2 creates a new BLE API instance with subscription support
@@ -413,7 +414,7 @@ func (api *LuaAPI) ExecuteScript(ctx context.Context, script string) error {
 	// Returns true to skip RaiseError only when inside a callback (prevents SIGSEGV).
 	// Returns false when outside a callback to allow RaiseError to stop the script.
 	hook := func(_ *lua.State) bool {
-		inCallback := api.inCallbackCount.Load() > 0
+		inCallback := api.LuaEngine.inCallback()
 
 		// Already shutting down - check if safe to RaiseError
 		if api.shuttingDown.Load() {
@@ -500,6 +501,14 @@ func (api *LuaAPI) registerBlimAPI() {
 // Returns a cancel function to Lua for external subscription control.
 func (api *LuaAPI) registerSubscribeFunction(L *lua.State) {
 	api.SafePushGoFunction(L, "subscribe", func(L *lua.State) int {
+		// Reentrancy guard (issue #3): executeSubscription performs a synchronous CCCD write
+		// (client.Subscribe) to enable notifications — a blocking BLE round-trip. From inside a
+		// callback that blocks the callback goroutine while holding stateMutex and risks a deadlock
+		// with the BLE event path. Dynamic subscription from a callback is not supported; defer it to
+		// the main loop. (Self-cancel via the callback's cancel() argument stays allowed — it does not
+		// go through this path.)
+		api.LuaEngine.raiseIfInCallback(L, "blim.subscribe")
+
 		// Expect a table as the first argument
 		if !L.IsTable(1) {
 			L.RaiseError("Error: subscribe() expects a lua table argument")
@@ -1006,11 +1015,14 @@ func (api *LuaAPI) callPTYDataCallback(callbackRef int, data []byte) error {
 		L.PushString(string(data))
 
 		// Call the function with one argument (the data string)
-		// This can panic if StackTrace() crashes while building LuaError
-		// Track callback depth to prevent RaiseError during L.Call (causes SIGSEGV)
-		api.inCallbackCount.Add(1)
-		err := L.Call(1, 0)
-		api.inCallbackCount.Add(-1)
+		// This can panic if StackTrace() crashes while building LuaError.
+		// Track callback depth (panic-safe): the decrement MUST run even if L.Call panics, or the
+		// count leaks and later main-loop blim.sleep/io.read would be wrongly rejected as in-callback.
+		err := func() error {
+			api.LuaEngine.enterCallback()
+			defer api.LuaEngine.exitCallback()
+			return L.Call(1, 0)
+		}()
 		if err != nil {
 			// Log the error for debugging
 			api.logger.Errorf("PTY Lua callback execution failed: %v", err)
@@ -1165,12 +1177,15 @@ func (api *LuaAPI) callLuaCallback(callbackRef int, record *device.Record, cance
 		// SafePushGoFunction pushes name and function; we only need the function, so drop the name
 		L.Remove(-2)
 
-		// Call the function with 2 arguments (record table, cancel function)
-		// This can panic if StackTrace() crashes while building LuaError
-		// Track callback depth to prevent RaiseError during L.Call (causes SIGSEGV)
-		api.inCallbackCount.Add(1)
-		err := L.Call(2, 0)
-		api.inCallbackCount.Add(-1)
+		// Call the function with 2 arguments (record table, cancel function).
+		// This can panic if StackTrace() crashes while building LuaError.
+		// Track callback depth (panic-safe): the decrement MUST run even if L.Call panics, or the
+		// count leaks and later main-loop blim.sleep/io.read would be wrongly rejected as in-callback.
+		err := func() error {
+			api.LuaEngine.enterCallback()
+			defer api.LuaEngine.exitCallback()
+			return L.Call(2, 0)
+		}()
 		if err != nil {
 			// Log the error for debugging
 			api.logger.Errorf("Lua callback execution failed: %v", err)
@@ -1314,6 +1329,13 @@ func (api *LuaAPI) registerCharacteristicFunction(L *lua.State) {
 		// Method: read() - reads the characteristic value from the device
 		// Returns (value, nil) on success or (nil, error_message) on failure
 		api.SafePushGoFunction(L, "read", func(L *lua.State) int {
+			// Reentrancy guard (issue #3): a synchronous device read from inside a callback blocks the
+			// callback goroutine (up to the read timeout) while it holds stateMutex, freezing the main
+			// loop and every other callback, and can deadlock against the BLE event path. Unlike
+			// blim.sleep it does not release the mutex, so it is not the SIGSEGV vector — but it is
+			// still unsafe from a callback. Fail deterministically; defer device I/O to the main loop.
+			api.LuaEngine.raiseIfInCallback(L, "characteristic.read()")
+
 			value, err := char.Read(api.characteristicReadTimeout)
 			if err != nil {
 				L.PushNil()
@@ -1352,6 +1374,12 @@ func (api *LuaAPI) registerCharacteristicFunction(L *lua.State) {
 					withResponse = L.ToBoolean(2)
 				}
 			}
+
+			// Reentrancy guard (issue #3): like read(), a synchronous device write from inside a
+			// callback blocks the callback goroutine while holding stateMutex, freezing the engine and
+			// risking a deadlock against the BLE event path. Guarded after argument validation so a
+			// malformed call still reports the more specific argument error.
+			api.LuaEngine.raiseIfInCallback(L, "characteristic.write()")
 
 			// Use the abstracted CharacteristicWriter interface with timeout
 			err := char.Write(data, withResponse, api.characteristicWriteTimeout)
@@ -1427,6 +1455,12 @@ func (api *LuaAPI) registerSleepFunction(L *lua.State) {
 			L.RaiseError("sleep(milliseconds) expects a non-negative number")
 			return 0
 		}
+
+		// Reentrancy guard (issue #3): blim.sleep releases stateMutex so other work runs during the
+		// wait. From inside a callback that hands the in-flight lua_State to another goroutine and
+		// corrupts it (SIGSEGV in lua_getinfo). Also covers blim.term.read_char(wait_ms), whose
+		// polling loop calls blim.sleep on every step. Fail deterministically instead of crashing.
+		api.LuaEngine.raiseIfInCallback(L, "blim.sleep")
 
 		// Get execution context for cancellation support
 		ctx := api.LuaEngine.scriptExecutionCtx

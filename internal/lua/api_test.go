@@ -275,6 +275,219 @@ func (suite *LuaApiTestSuite) TestErrorHandling() {
 	)
 }
 
+// TestCallbackBlockingOpGuards groups the issue #3 reentrancy guards. Every Lua-exposed operation
+// that is unsafe to run while a callback holds the single lua_State must be rejected with a clean,
+// recoverable Lua error instead of crashing or freezing the engine. Two hazard classes are covered:
+//   - releases stateMutex mid-callback -> reentrant corruption / SIGSEGV: blim.sleep, io.read;
+//   - blocks the callback goroutine on a synchronous BLE round-trip while holding the state ->
+//     engine freeze / potential deadlock: characteristic.read(), characteristic.write(), blim.subscribe.
+//
+// Each subtest exercises one operation; they share the subscribe -> notify -> op -> stderr-error ->
+// still-alive shape and are grouped here to make that relationship explicit. (Self-cancel via the
+// callback's cancel() argument stays allowed and is verified elsewhere.)
+func (suite *LuaApiTestSuite) TestCallbackBlockingOpGuards() {
+	suite.Run("Lua: blim.sleep inside subscription callback raises guard error", func() {
+		// GOAL: Verify blim.sleep issued from a notification callback fails with a deterministic guard
+		//       error instead of releasing the shared lua_State for concurrent, corrupting reentry (issue #3)
+		//
+		// TEST SCENARIO: Subscribe → notification fires callback → callback calls blim.sleep → clean Lua error to stderr → engine keeps running
+
+		// Root cause: a callback runs while its goroutine holds the single lua_State via
+		// DoWithState -> stateMutex.Lock(). blim.sleep unconditionally does stateMutex.Unlock(), handing
+		// the suspended state to another DoWithState (the main loop or a second subscription); that
+		// second entry runs Lua on the same in-flight lua_State, corrupting its CallInfo and segfaulting
+		// in lua_getinfo. The real-world trigger is blim.term.read_char(wait_ms), whose 10 ms polling
+		// loop calls blim.sleep on every step (a UI redraw waiting on a keypress from a notification
+		// callback). The guard refuses to release the mutex while inCallbackCount > 0, turning the
+		// SIGSEGV into a deterministic, recoverable failure; the race-driven crash itself is not asserted.
+		suite.Connect("1").FluentLuaTest().
+			MustExecuteScript(`
+			blim.subscribe{
+				services = {
+					{
+						service = "1234",
+						chars = {"5678"}
+					}
+				},
+				Mode = "EveryUpdate",
+				MaxRate = 0,
+				Callback = function(record)
+					-- Releasing the shared lua_State mid-callback is the corruption vector.
+					blim.sleep(10)
+				end
+			}
+		`).
+			// Simulate a notification to trigger the callback
+			EmmitData(func(emitter *testutils.PeripheralDataEmitter) {
+				emitter.
+					WithService("1234").WithCharacteristic("5678", 0x01, 0x02).
+					Emit(true)
+			}).
+
+			// Give it time for the async callback to execute
+			Sleep(time.Millisecond * 50).
+
+			// The guard raises a clean Lua error routed to stderr; the process MUST NOT crash.
+			ConsumeStderrAsLuaError("blim.sleep is not allowed inside a callback").
+			ExecuteScript(`print("Still working after guarded sleep")`).
+			AssertNoLuaScriptExecutionError().
+			ConsumeStdout("Still working after guarded sleep\n")
+	})
+
+	suite.Run("Lua: io.read inside subscription callback raises guard error", func() {
+		// GOAL: Verify io.read issued from a notification callback fails with the same deterministic
+		//       guard as blim.sleep — io.read releases the shared state the same way (issue #3)
+		//
+		// TEST SCENARIO: Subscribe → notification fires callback → callback calls io.read → clean Lua error to stderr → engine keeps running
+
+		// io.read is the second mutex-releasing primitive; the guard short-circuits before any stdin
+		// machinery, so this is deterministic and needs no TTY.
+		suite.Connect("1").FluentLuaTest().
+			MustExecuteScript(`
+			blim.subscribe{
+				services = {
+					{
+						service = "1234",
+						chars = {"5678"}
+					}
+				},
+				Mode = "EveryUpdate",
+				MaxRate = 0,
+				Callback = function(record)
+					io.read()
+				end
+			}
+		`).
+			// Simulate a notification to trigger the callback
+			EmmitData(func(emitter *testutils.PeripheralDataEmitter) {
+				emitter.
+					WithService("1234").WithCharacteristic("5678", 0x01, 0x02).
+					Emit(true)
+			}).
+
+			// Give it time for the async callback to execute
+			Sleep(time.Millisecond * 50).
+
+			// The guard raises a clean Lua error routed to stderr; the process MUST NOT crash.
+			ConsumeStderrAsLuaError("io.read is not allowed inside a callback").
+			ExecuteScript(`print("Still working after guarded io.read")`).
+			AssertNoLuaScriptExecutionError().
+			ConsumeStdout("Still working after guarded io.read\n")
+	})
+
+	suite.Run("Lua: characteristic.read() inside subscription callback raises guard error", func() {
+		// GOAL: Verify a synchronous device read from a notification callback fails with the guard
+		//       instead of blocking the engine (up to the read timeout) while holding the state (issue #3)
+		//
+		// TEST SCENARIO: Subscribe → notification fires callback → callback calls char.read() → clean Lua error to stderr → engine keeps running
+
+		// char.read() does not release the mutex (not the SIGSEGV vector) but blocks the callback
+		// goroutine while holding stateMutex; the guard short-circuits before the device op.
+		suite.Connect("1").FluentLuaTest().
+			MustExecuteScript(`
+			blim.subscribe{
+				services = {
+					{
+						service = "1234",
+						chars = {"5678"}
+					}
+				},
+				Mode = "EveryUpdate",
+				MaxRate = 0,
+				Callback = function(record)
+					local char = blim.characteristic("1234", "5678")
+					char.read()
+				end
+			}
+		`).
+			EmmitData(func(emitter *testutils.PeripheralDataEmitter) {
+				emitter.
+					WithService("1234").WithCharacteristic("5678", 0x01, 0x02).
+					Emit(true)
+			}).
+			Sleep(time.Millisecond * 50).
+			ConsumeStderrAsLuaError("characteristic.read() is not allowed inside a callback").
+			ExecuteScript(`print("Still working after guarded read")`).
+			AssertNoLuaScriptExecutionError().
+			ConsumeStdout("Still working after guarded read\n")
+	})
+
+	suite.Run("Lua: characteristic.write() inside subscription callback raises guard error", func() {
+		// GOAL: Verify a synchronous device write from a notification callback fails with the guard
+		//       (distinct from read(): it dispatches a different blocking device op) (issue #3)
+		//
+		// TEST SCENARIO: Subscribe → notification fires callback → callback calls char.write() → clean Lua error to stderr → engine keeps running
+
+		suite.Connect("1").FluentLuaTest().
+			MustExecuteScript(`
+			blim.subscribe{
+				services = {
+					{
+						service = "1234",
+						chars = {"5678"}
+					}
+				},
+				Mode = "EveryUpdate",
+				MaxRate = 0,
+				Callback = function(record)
+					local char = blim.characteristic("1234", "ABCD")
+					char.write("x")
+				end
+			}
+		`).
+			EmmitData(func(emitter *testutils.PeripheralDataEmitter) {
+				emitter.
+					WithService("1234").WithCharacteristic("5678", 0x01, 0x02).
+					Emit(true)
+			}).
+			Sleep(time.Millisecond * 50).
+			ConsumeStderrAsLuaError("characteristic.write() is not allowed inside a callback").
+			ExecuteScript(`print("Still working after guarded write")`).
+			AssertNoLuaScriptExecutionError().
+			ConsumeStdout("Still working after guarded write\n")
+	})
+
+	suite.Run("Lua: blim.subscribe inside subscription callback raises guard error", func() {
+		// GOAL: Verify a dynamic subscription from a notification callback fails with the guard — its
+		//       synchronous CCCD write would block the callback goroutine while holding the state (issue #3)
+		//
+		// TEST SCENARIO: Subscribe → notification fires callback → callback calls blim.subscribe → clean Lua error to stderr → engine keeps running
+
+		// blim.subscribe -> executeSubscription -> client.Subscribe is a blocking BLE round-trip; the
+		// guard short-circuits before it. Self-cancel via the callback's cancel() arg stays allowed.
+		suite.Connect("1").FluentLuaTest().
+			MustExecuteScript(`
+			blim.subscribe{
+				services = {
+					{
+						service = "1234",
+						chars = {"5678"}
+					}
+				},
+				Mode = "EveryUpdate",
+				MaxRate = 0,
+				Callback = function(record)
+					blim.subscribe{
+						services = {{ service = "180d", chars = {"2a37"} }},
+						Mode = "EveryUpdate",
+						Callback = function(r) end
+					}
+				end
+			}
+		`).
+			EmmitData(func(emitter *testutils.PeripheralDataEmitter) {
+				emitter.
+					WithService("1234").WithCharacteristic("5678", 0x01, 0x02).
+					Emit(true)
+			}).
+			Sleep(time.Millisecond * 50).
+			ConsumeStderrAsLuaError("blim.subscribe is not allowed inside a callback").
+			ExecuteScript(`print("Still working after guarded subscribe")`).
+			AssertNoLuaScriptExecutionError().
+			ConsumeStdout("Still working after guarded subscribe\n")
+	})
+}
+
 // TestSubscriptionScenarios validates BLE subscription behavior across multiple streaming modes
 // by executing YAML-defined test scenarios.
 //
