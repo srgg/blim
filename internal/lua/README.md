@@ -64,7 +64,6 @@ Read-only table containing device information.
 - `rssi` (number) - Signal strength in dBm
 - `connectable` (boolean) - Whether device accepts connections
 - `tx_power` (number, optional) - Transmit power in dBm
-- `last_seen` (string) - ISO 8601 timestamp
 - `advertised_services` (array) - Service UUIDs from advertisements
 - `manufacturer_data` (table or nil) - Manufacturer data object (nil if no manufacturer data), with:
   - `value` (string) - Hex-encoded raw manufacturer data
@@ -100,21 +99,21 @@ end
 ### `blim.bridge`
 Read-only table containing bridge information (only available when running in bridge mode).
 
-**Getter Functions:**
-- `tty_name` - Returns TTY device path (e.g., "/dev/ttys010")
-- `tty_symlink` - Returns tty symlink (empty if not created)
+**Getter Functions** (call them — they are functions, not fields):
+- `tty_name()` - Returns TTY device path (e.g., "/dev/ttys010")
+- `tty_symlink()` - Returns tty symlink (empty if not created)
+
+Both raise an error when called outside bridge mode, so a bridge script (which
+always runs under `blim bridge`) can call them directly.
 
 **Example:**
 ```lua
--- Check if running in bridge mode
-if blim.bridge.tty_name and blim.bridge.tty_name ~= "" then
-    print("Bridge PTY:", blim.bridge.tty_name)
+-- A bridge script always runs in bridge mode; the getters are safe to call.
+print("Bridge PTY:", blim.bridge.tty_name())
 
-    if blim.bridge.tty_symlink ~= "" then
-        print("TTY Symlink:", blim.bridge.tty_symlink)
-    end
-else
-    print("Not running in bridge mode")
+local symlink = blim.bridge.tty_symlink()
+if symlink ~= "" then
+    print("TTY Symlink:", symlink)
 end
 ```
 
@@ -1005,6 +1004,86 @@ local err = blim.write_receive_async{
 
 ---
 
+### `blim.pcall(f, ...)` → `ok, ...`
+
+Protected call — the sandbox substitute for Lua's standard `pcall`, which is
+removed (its longjmp-based unwinding cannot cross Go call frames safely).
+
+**Parameters:**
+- `f` (function) - Function to call
+- `...` - Arguments passed to `f`
+
+**Returns:**
+- On success: `true` followed by all of `f`'s return values
+- On failure: `false` followed by the error message
+
+**Limitation:** `blim.pcall` catches errors raised by Lua code and C built-ins
+(`error()`, `ffi.cdef`, ...). Errors raised by **Go-backed API functions**
+(`require`, `blim.subscribe`, `blim.characteristic`, ...) are Go-side panics and
+are **not** catchable — they abort the script by design. Handle those via the
+`nil, err` return values those functions already provide, not `blim.pcall`.
+
+**Example:**
+```lua
+-- Catch a Lua-level error
+local ok, err = blim.pcall(function() error("boom") end)
+if not ok then
+    print("caught:", err)  -- caught: ...: boom
+end
+
+-- Forward return values on success
+local ok, sum = blim.pcall(function(a, b) return a + b end, 2, 3)
+assert(ok and sum == 5)
+```
+
+---
+
+### `blim.term`
+
+Raw terminal mode and single-keypress input for interactive bridge scripts.
+Requires LuaJIT (uses FFI); every method raises on unsupported platforms.
+
+**Functions:**
+- `blim.term.enable_raw()` → `true` | `nil, err` - Enable raw mode (no echo, no
+  line buffering, non-blocking reads). Idempotent. Returns `nil, "tcgetattr failed"`
+  when stdin is not a TTY.
+- `blim.term.disable_raw()` - Restore the original terminal settings. Idempotent.
+- `blim.term.read_char([wait_ms])` → `char` | `nil` | `nil, msg, code` - Read a
+  single character, following `io.read` semantics (see below).
+- `blim.term.EOF` - Sentinel `code` value returned by `read_char` when stdin is closed.
+
+**`read_char` return values:**
+- `char` - a key was read
+- `nil` - no key available yet (non-blocking, or the wait window elapsed)
+- `nil, msg, code` - terminal condition: `code == blim.term.EOF` means stdin was
+  closed/hung up (interactive loops MUST exit); any other `code` is the read `errno`
+
+With no `wait_ms` the read is non-blocking. With `wait_ms` it waits up to that
+many milliseconds, yielding via `blim.sleep` so the engine mutex is released and
+BLE callbacks keep flowing while the script waits.
+
+**Example: interactive keypress loop**
+```lua
+assert(blim.term.enable_raw())
+
+while true do
+    local key, err, code = blim.term.read_char(200)
+    if key == "q" then
+        break
+    elseif code == blim.term.EOF then
+        break  -- stdin closed (shutdown / input exhausted)
+    end
+    -- bare nil: no key this window; BLE callbacks ran during the wait
+end
+
+blim.term.disable_raw()
+```
+
+See [examples/vehicle-control-bridge.lua](../../examples/vehicle-control-bridge.lua)
+for a full interactive control panel built on `blim.term`.
+
+---
+
 ## TODO: Upcoming API Extensions
 
 The following functions are planned for future implementation to provide complete BLE interaction capabilities.
@@ -1073,6 +1152,8 @@ Both approaches will coexist - use whichever fits your use case.
 - ✅ **Subscriptions** - `blim.subscribe()` supports notifications/indications with multiple streaming modes
 - ✅ **Subscription cancellation** - `blim.subscribe()` returns cancel function; callback receives cancel for self-cancellation
 - ✅ **PTY bridge** - `blim.bridge.pty_write()`, `pty_read()`, and `pty_on_data()` for async PTY communication
+- ✅ **Protected calls** - `blim.pcall()` catches Lua/C errors (Go-backed errors abort by design)
+- ✅ **Interactive terminal** - `blim.term` raw mode and single-keypress input for interactive bridge scripts
 
 **⚠️ Planned features:**
 - ⚠️ **Function-based API** - Simplified `ble.read()`, `ble.write()` not yet available
@@ -1148,6 +1229,8 @@ All Go functions exposed to Lua are wrapped:
 - ✅ `blim.bridge.pty_read()` (bridge PTY read)
 - ✅ `blim.bridge.pty_on_data(callback)` (bridge PTY async callback)
 - ✅ `blim.sleep()` (utility function for delays)
+- ✅ `blim.pcall()` (protected call for Lua/C errors)
+- ✅ `blim.term.enable_raw()` / `disable_raw()` / `read_char()` (interactive terminal input)
 
 **Engine Functions (`lua_engine.go`):**
 - ✅ `print()` (overridden for output capture)
