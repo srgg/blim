@@ -556,10 +556,16 @@ func (e *LuaEngine) registerIOReadContextAwareInternal() {
 					count = L.ToInteger(1)
 				}
 
-				// Reentrancy guard (issue #3): io.read releases stateMutex to block, exactly like
-				// blim.sleep. From inside a callback that would hand the in-flight lua_State to another
-				// goroutine and corrupt it. Fail deterministically before touching stdin machinery.
-				e.raiseIfInCallback(L, "io.read")
+				// Reentrancy guard (issue #3): io.read releases stateMutex to block. From inside a
+				// callback that would hand the in-flight lua_State to another goroutine and corrupt it.
+				// Fail by RETURNING (nil, msg) — io.read-style — BEFORE the mutex release, not via
+				// RaiseError: golua RaiseError is a Go panic that bypasses the VM unwinder and corrupts
+				// the recovered lua_State (crashing the process later). Scripts handle this like EOF.
+				if e.inCallback() {
+					L.PushNil()
+					L.PushString("io.read() is not allowed inside a subscribe/PTY callback; defer to the main loop")
+					return 2
+				}
 
 				// Get execution context for cancellation support
 				ctx := e.scriptExecutionCtx
