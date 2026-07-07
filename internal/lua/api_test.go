@@ -324,6 +324,7 @@ func (suite *LuaApiTestSuite) TestCallbackBlockingOpGuards() {
 		ft := suite.Connect("1").FluentLuaTest().
 			MustExecuteScript(`
 			sleep_v, sleep_err = "unset", "unset"
+			badarg_v, badarg_err = "unset", "unset"
 			blim.subscribe{
 				services = {
 					{
@@ -335,6 +336,9 @@ func (suite *LuaApiTestSuite) TestCallbackBlockingOpGuards() {
 				MaxRate = 0,
 				Callback = function(record)
 					sleep_v, sleep_err = blim.sleep(10)
+					-- A bad argument from a callback must ALSO be guarded: the guard runs BEFORE
+					-- argument validation, so this returns (nil, msg) instead of raising.
+					badarg_v, badarg_err = blim.sleep("not a number")
 				end
 			}
 		`).
@@ -349,6 +353,9 @@ func (suite *LuaApiTestSuite) TestCallbackBlockingOpGuards() {
 			assert(sleep_v == nil, "blim.sleep in a callback MUST return nil, got: " .. tostring(sleep_v))
 			assert(type(sleep_err) == "string" and sleep_err:find("subscribe/PTY callback") ~= nil,
 				"blim.sleep in a callback MUST return the guard message, got: " .. tostring(sleep_err))
+			assert(badarg_v == nil, "blim.sleep(badarg) in a callback MUST return nil (guard before validation), got: " .. tostring(badarg_v))
+			assert(type(badarg_err) == "string" and badarg_err:find("subscribe/PTY callback") ~= nil,
+				"blim.sleep(badarg) in a callback MUST return the guard message, got: " .. tostring(badarg_err))
 		`)
 	})
 
