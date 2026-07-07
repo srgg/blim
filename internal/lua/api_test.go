@@ -496,6 +496,47 @@ func (suite *LuaApiTestSuite) TestCallbackBlockingOpGuards() {
 				"blim.subscribe in a callback MUST complete and return a cancel handle, got: " .. tostring(nested_ok))
 		`)
 	})
+
+	suite.Run("Lua: blim.characteristic() not found inside a callback returns nil (regression: no crash)", func() {
+		// GOAL: Regression for the likely original #3 crash path — a callback (e.g. a UI redraw)
+		//       looking up a missing characteristic. blim.characteristic() must RETURN nil, not
+		//       RaiseError: the Go-side raise the old code used is a Go panic that corrupts the
+		//       recovered lua_State on LuaJIT and crashes the process LATER under real work.
+		//
+		// TEST SCENARIO: Subscribe → notification fires callback → blim.characteristic(missing) returns
+		//                nil → main loop runs heavy protected-call work → engine still works
+
+		ft := suite.Connect("1").FluentLuaTest().
+			MustExecuteScript(`
+			lookup_result = "unset"
+			blim.subscribe{
+				services = { { service = "1234", chars = {"5678"} } },
+				Mode = "EveryUpdate",
+				MaxRate = 0,
+				Callback = function(record)
+					local char = blim.characteristic("9999", "5678")
+					lookup_result = (char == nil) and "nil" or "found"
+				end
+			}
+		`).
+			EmmitData(func(emitter *testutils.PeripheralDataEmitter) {
+				emitter.WithService("1234").WithCharacteristic("5678", 0x01, 0x02).Emit(true)
+			}).
+			Sleep(time.Millisecond * 50)
+
+		// The lookup returned nil (callback completed) AND heavy VM work afterwards does not crash —
+		// the state was not corrupted. On the old Go-raise code this loop SIGBUS'd.
+		ft.MustExecuteScript(`
+			assert(lookup_result == "nil",
+				"blim.characteristic() for a missing char in a callback MUST return nil, got: " .. tostring(lookup_result))
+			local sum = 0
+			for i = 1, 100000 do
+				local ok, v = blim.pcall(function() return i end)
+				if ok then sum = sum + v end
+			end
+			assert(sum > 0, "engine MUST survive heavy protected-call work after the callback lookup")
+		`)
+	})
 }
 
 // TestCallbackGuardSurvivesHeavyVMWork verifies that after a callback invokes a guarded op — which
@@ -1083,22 +1124,23 @@ func (suite *LuaApiTestSuite) TestCharacteristicFunction() {
 				assert(has_property, "at least one property should be set")`,
 		},
 		TestCase{
-			// GOAL: Verify blim.characteristic() raises an error when service UUID not found
+			// GOAL: Verify blim.characteristic() returns nil (does NOT raise) when the service is not
+			//       found — a lookup miss is an expected, queryable condition, so scripts can do
+			//       `local char = blim.characteristic(...); if char then ... end` (issue #3)
 			//
-			// TEST SCENARIO: Lookup with non-existent service UUID → Lua error raised → verify an error message
+			// TEST SCENARIO: Lookup with non-existent service UUID → returns nil, no error
 
-			Name:        "Error: Invalid service UUID",
-			Script:      `local char = blim.characteristic("9999", "5678")`,
-			ScriptError: "characteristic not found",
+			Name:   "blim.characteristic() returns nil when service UUID not found",
+			Script: `local char = blim.characteristic("9999", "5678"); assert(char == nil, "MUST return nil when not found")`,
 		},
 		TestCase{
-			// GOAL: Verify blim.characteristic() raises error when the characteristic UUID not found in the service
+			// GOAL: Verify blim.characteristic() returns nil when the characteristic UUID is not found in
+			//       the service (issue #3)
 			//
-			// TEST SCENARIO: Lookup with valid service but invalid char UUID → Lua error raised → verify an error message
+			// TEST SCENARIO: Lookup with valid service but invalid char UUID → returns nil, no error
 
-			Name:        "Error: Invalid characteristic UUID",
-			Script:      `local char = blim.characteristic("1234", "9999")`,
-			ScriptError: "characteristic not found",
+			Name:   "blim.characteristic() returns nil when characteristic UUID not found",
+			Script: `local char = blim.characteristic("1234", "9999"); assert(char == nil, "MUST return nil when not found")`,
 		},
 		TestCase{
 			// GOAL: Verify blim.characteristic() raises an error when no arguments provided
@@ -1119,14 +1161,13 @@ func (suite *LuaApiTestSuite) TestCharacteristicFunction() {
 			ScriptError: "expects two string arguments",
 		},
 		TestCase{
-			// GOAL: Verify blim.characteristic() handles Lua's implicit number-to-string conversion and fails lookup
-			//       (Note: Lua ToString() converts numbers to strings, so 123 becomes "123", then lookup fails)
+			// GOAL: Verify blim.characteristic() handles Lua's implicit number-to-string conversion and
+			//       returns nil when the (converted) lookup misses (123 -> "123", not found) (issue #3)
 			//
-			// TEST SCENARIO: Call with number instead of string → number converted to string → lookup fails → error raised
+			// TEST SCENARIO: Call with number instead of string → converted to string → lookup miss → nil
 
-			Name:        "Error: Invalid argument type - number converted to string",
-			Script:      `local char = blim.characteristic(123, "5678")`,
-			ScriptError: "characteristic not found",
+			Name:   "blim.characteristic() returns nil when number arg converts to a missing UUID",
+			Script: `local char = blim.characteristic(123, "5678"); assert(char == nil, "MUST return nil when not found")`,
 		},
 		TestCase{
 			// GOAL: Verify blim.characteristic() raises error when passed table instead of string UUID

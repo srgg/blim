@@ -1211,7 +1211,7 @@ func (api *LuaAPI) callLuaCallback(callbackRef int, record *device.Record, cance
 // registerCharacteristicFunction registers the ble.characteristic() function
 func (api *LuaAPI) registerCharacteristicFunction(L *lua.State) {
 	api.SafePushGoFunction(L, "characteristic", func(L *lua.State) int {
-		// Validate arguments
+		// Argument validation is misuse (wrong types) — raise, fail fast.
 		if !L.IsString(1) || !L.IsString(2) {
 			L.RaiseError("characteristic(service_uuid, char_uuid) expects two string arguments")
 			return 0
@@ -1220,18 +1220,20 @@ func (api *LuaAPI) registerCharacteristicFunction(L *lua.State) {
 		serviceUUID := L.ToString(1)
 		charUUID := L.ToString(2)
 
-		// Get connection when a function is called, not when registered
+		// Not-found / no-connection are expected, queryable RUNTIME conditions, not errors: RETURN nil
+		// so scripts can do `local char = blim.characteristic(...); if char then ... end` (issue #3).
+		// Raising here (a Go panic) also corrupts the recovered lua_State when this is called from a
+		// callback, which was a crash path; returning nil avoids that entirely.
 		connection := api.device.GetConnection()
 		if connection == nil {
-			L.RaiseError("no connection available")
-			return 0
+			L.PushNil()
+			return 1
 		}
 
-		// Get characteristic from connection
 		char, err := connection.GetCharacteristic(serviceUUID, charUUID)
 		if err != nil {
-			L.RaiseError(fmt.Sprintf("characteristic not found: %v", err))
-			return 0
+			L.PushNil()
+			return 1
 		}
 
 		// Create a handle table with metadata fields
