@@ -335,16 +335,18 @@ func (suite *LuaApiTestSuite) TestCallbackBlockingOpGuards() {
 			ConsumeStdout("Still working after guarded sleep\n")
 	})
 
-	suite.Run("Lua: io.read inside subscription callback raises guard error", func() {
-		// GOAL: Verify io.read issued from a notification callback fails with the same deterministic
-		//       guard as blim.sleep — io.read releases the shared state the same way (issue #3)
+	suite.Run("Lua: io.read() inside a callback returns nil (does not raise)", func() {
+		// GOAL: Verify io.read() from a callback RETURNS (nil, msg) instead of a Go-side RaiseError.
+		//       io.read releases stateMutex, so guarding it is essential — but the guard must fail by
+		//       RETURN (io.read-style nil) before the release, not by RaiseError, which is a Go panic
+		//       that corrupts the recovered lua_State and crashes the process later (issue #3).
 		//
-		// TEST SCENARIO: Subscribe → notification fires callback → callback calls io.read → clean Lua error to stderr → engine keeps running
+		// TEST SCENARIO: Subscribe → notification fires callback → io.read() returns (nil, err) before
+		//                releasing the mutex → the callback completes → script observes the guard message
 
-		// io.read is the second mutex-releasing primitive; the guard short-circuits before any stdin
-		// machinery, so this is deterministic and needs no TTY.
-		suite.Connect("1").FluentLuaTest().
+		ft := suite.Connect("1").FluentLuaTest().
 			MustExecuteScript(`
+			io_v, io_err = "unset", "unset"
 			blim.subscribe{
 				services = {
 					{
@@ -355,25 +357,22 @@ func (suite *LuaApiTestSuite) TestCallbackBlockingOpGuards() {
 				Mode = "EveryUpdate",
 				MaxRate = 0,
 				Callback = function(record)
-					io.read()
+					io_v, io_err = io.read()
 				end
 			}
 		`).
-			// Simulate a notification to trigger the callback
 			EmmitData(func(emitter *testutils.PeripheralDataEmitter) {
 				emitter.
 					WithService("1234").WithCharacteristic("5678", 0x01, 0x02).
 					Emit(true)
 			}).
+			Sleep(time.Millisecond * 50)
 
-			// Give it time for the async callback to execute
-			Sleep(time.Millisecond * 50).
-
-			// The guard raises a clean Lua error routed to stderr; the process MUST NOT crash.
-			ConsumeStderrAsLuaError("io.read is not allowed inside a callback").
-			ExecuteScript(`print("Still working after guarded io.read")`).
-			AssertNoLuaScriptExecutionError().
-			ConsumeStdout("Still working after guarded io.read\n")
+		ft.MustExecuteScript(`
+			assert(io_v == nil, "io.read() in a callback MUST return nil, got: " .. tostring(io_v))
+			assert(type(io_err) == "string" and io_err:find("subscribe/PTY callback") ~= nil,
+				"io.read() in a callback MUST return the guard message, got: " .. tostring(io_err))
+		`)
 	})
 
 	suite.Run("Lua: characteristic.read() inside a callback returns an error (does not raise)", func() {
