@@ -376,16 +376,18 @@ func (suite *LuaApiTestSuite) TestCallbackBlockingOpGuards() {
 			ConsumeStdout("Still working after guarded io.read\n")
 	})
 
-	suite.Run("Lua: characteristic.read() inside subscription callback raises guard error", func() {
-		// GOAL: Verify a synchronous device read from a notification callback fails with the guard
-		//       instead of blocking the engine (up to the read timeout) while holding the state (issue #3)
+	suite.Run("Lua: characteristic.read() inside a callback returns an error (does not raise)", func() {
+		// GOAL: Verify char.read() from a callback RETURNS (nil, msg) — a normal Lua value the script
+		//       can handle — instead of a Go-side RaiseError. golua RaiseError is a Go panic that
+		//       bypasses the LuaJIT VM unwinder; recovered mid-callback it corrupts the lua_State and
+		//       crashes the process later. The guard must fail by return, not by raise (issue #3).
 		//
-		// TEST SCENARIO: Subscribe → notification fires callback → callback calls char.read() → clean Lua error to stderr → engine keeps running
+		// TEST SCENARIO: Subscribe → notification fires callback → char.read() returns (nil, err) →
+		//                the callback completes → script observes the guard message in err
 
-		// char.read() does not release the mutex (not the SIGSEGV vector) but blocks the callback
-		// goroutine while holding stateMutex; the guard short-circuits before the device op.
-		suite.Connect("1").FluentLuaTest().
+		ft := suite.Connect("1").FluentLuaTest().
 			MustExecuteScript(`
+			read_v, read_err = "unset", "unset"
 			blim.subscribe{
 				services = {
 					{
@@ -397,7 +399,7 @@ func (suite *LuaApiTestSuite) TestCallbackBlockingOpGuards() {
 				MaxRate = 0,
 				Callback = function(record)
 					local char = blim.characteristic("1234", "5678")
-					char.read()
+					read_v, read_err = char.read()
 				end
 			}
 		`).
@@ -406,21 +408,27 @@ func (suite *LuaApiTestSuite) TestCallbackBlockingOpGuards() {
 					WithService("1234").WithCharacteristic("5678", 0x01, 0x02).
 					Emit(true)
 			}).
-			Sleep(time.Millisecond * 50).
-			ConsumeStderrAsLuaError("characteristic.read() is not allowed inside a callback").
-			ExecuteScript(`print("Still working after guarded read")`).
-			AssertNoLuaScriptExecutionError().
-			ConsumeStdout("Still working after guarded read\n")
+			Sleep(time.Millisecond * 50)
+
+		// The callback completed (read() returned instead of raising): a nil value and a guard message.
+		// On the buggy Go-raise code the callback would abort and leave the flags "unset".
+		ft.MustExecuteScript(`
+			assert(read_v == nil, "read() in a callback MUST return a nil value, got: " .. tostring(read_v))
+			assert(type(read_err) == "string" and read_err:find("subscribe/PTY callback") ~= nil,
+				"read() in a callback MUST return the guard message, got: " .. tostring(read_err))
+		`)
 	})
 
-	suite.Run("Lua: characteristic.write() inside subscription callback raises guard error", func() {
-		// GOAL: Verify a synchronous device write from a notification callback fails with the guard
-		//       (distinct from read(): it dispatches a different blocking device op) (issue #3)
+	suite.Run("Lua: characteristic.write() inside a callback returns an error (does not raise)", func() {
+		// GOAL: Verify char.write() from a callback RETURNS (nil, msg) rather than raising, for the same
+		//       corruption reason as read() (issue #3).
 		//
-		// TEST SCENARIO: Subscribe → notification fires callback → callback calls char.write() → clean Lua error to stderr → engine keeps running
+		// TEST SCENARIO: Subscribe → notification fires callback → char.write() returns (nil, err) →
+		//                the callback completes → script observes the guard message in err
 
-		suite.Connect("1").FluentLuaTest().
+		ft := suite.Connect("1").FluentLuaTest().
 			MustExecuteScript(`
+			write_v, write_err = "unset", "unset"
 			blim.subscribe{
 				services = {
 					{
@@ -432,7 +440,7 @@ func (suite *LuaApiTestSuite) TestCallbackBlockingOpGuards() {
 				MaxRate = 0,
 				Callback = function(record)
 					local char = blim.characteristic("1234", "ABCD")
-					char.write("x")
+					write_v, write_err = char.write("x")
 				end
 			}
 		`).
@@ -441,11 +449,13 @@ func (suite *LuaApiTestSuite) TestCallbackBlockingOpGuards() {
 					WithService("1234").WithCharacteristic("5678", 0x01, 0x02).
 					Emit(true)
 			}).
-			Sleep(time.Millisecond * 50).
-			ConsumeStderrAsLuaError("characteristic.write() is not allowed inside a callback").
-			ExecuteScript(`print("Still working after guarded write")`).
-			AssertNoLuaScriptExecutionError().
-			ConsumeStdout("Still working after guarded write\n")
+			Sleep(time.Millisecond * 50)
+
+		ft.MustExecuteScript(`
+			assert(write_v == nil, "write() in a callback MUST return a nil value, got: " .. tostring(write_v))
+			assert(type(write_err) == "string" and write_err:find("subscribe/PTY callback") ~= nil,
+				"write() in a callback MUST return the guard message, got: " .. tostring(write_err))
+		`)
 	})
 
 	suite.Run("Lua: blim.subscribe inside subscription callback raises guard error", func() {
