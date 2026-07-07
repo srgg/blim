@@ -1457,7 +1457,20 @@ func (api *LuaAPI) registerCharacteristicFunction(L *lua.State) {
 // The sleep is context-aware and will return early if the execution context is cancelled.
 func (api *LuaAPI) registerSleepFunction(L *lua.State) {
 	api.SafePushGoFunction(L, "sleep", func(L *lua.State) int {
-		// Validate argument
+		// Guard (issue #3): blim.sleep releases stateMutex so other work runs during the wait; from
+		// inside a callback that hands the in-flight lua_State to another goroutine and corrupts it.
+		// Fail by RETURNING (nil, msg) BEFORE the release, not via RaiseError (a Go panic that bypasses
+		// the LuaJIT VM unwinder and corrupts the recovered lua_State). Checked FIRST so a bad-argument
+		// call from a callback also returns cleanly instead of hitting the argument-validation raise
+		// below. Also covers blim.term.read_char(wait_ms). (Cancellation below still raises Go-side —
+		// it is terminal.)
+		if api.LuaEngine.inCallback() {
+			L.PushNil()
+			L.PushString("blim.sleep is not allowed inside a subscribe/PTY callback; defer to the main loop")
+			return 2
+		}
+
+		// Validate argument (only reachable from the main loop, where a Go-side raise is safe).
 		if !L.IsNumber(1) {
 			L.RaiseError("sleep(milliseconds) expects a number argument")
 			return 0
@@ -1467,17 +1480,6 @@ func (api *LuaAPI) registerSleepFunction(L *lua.State) {
 		if ms < 0 {
 			L.RaiseError("sleep(milliseconds) expects a non-negative number")
 			return 0
-		}
-
-		// Guard (issue #3): blim.sleep releases stateMutex so other work runs during the wait; from
-		// inside a callback that hands the in-flight lua_State to another goroutine and corrupts it.
-		// Fail by RETURNING (nil, msg) BEFORE the release, not via RaiseError (a Go panic that bypasses
-		// the LuaJIT VM unwinder and corrupts the recovered lua_State). Also covers
-		// blim.term.read_char(wait_ms). (Cancellation below still raises Go-side — it is terminal.)
-		if api.LuaEngine.inCallback() {
-			L.PushNil()
-			L.PushString("blim.sleep is not allowed inside a subscribe/PTY callback; defer to the main loop")
-			return 2
 		}
 
 		// Get execution context for cancellation support
