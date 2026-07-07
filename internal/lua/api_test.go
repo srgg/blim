@@ -276,16 +276,17 @@ func (suite *LuaApiTestSuite) TestErrorHandling() {
 	)
 }
 
-// TestCallbackBlockingOpGuards groups the issue #3 reentrancy guards. Every Lua-exposed operation
-// that is unsafe to run while a callback holds the single lua_State must be rejected with a clean,
-// recoverable Lua error instead of crashing or freezing the engine. Two hazard classes are covered:
-//   - releases stateMutex mid-callback -> reentrant corruption / SIGSEGV: blim.sleep, io.read;
-//   - blocks the callback goroutine on a synchronous BLE round-trip while holding the state ->
-//     engine freeze / potential deadlock: characteristic.read(), characteristic.write(), blim.subscribe.
+// TestCallbackBlockingOpGuards groups the issue #3 callback guards. Operations that are unsafe while
+// a callback holds the single lua_State must fail by RETURNING an error value (nil, msg) — never via
+// a Go-side RaiseError, which is a Go panic that bypasses the LuaJIT VM unwinder and corrupts the
+// recovered lua_State (crashing the process later). The guarded ops:
+//   - release stateMutex mid-callback (reentrant corruption): blim.sleep, io.read;
+//   - block the callback goroutine on a synchronous device op (stall / self-deadlock reading a
+//     subscribed characteristic from its own callback): characteristic.read(), characteristic.write().
 //
-// Each subtest exercises one operation; they share the subscribe -> notify -> op -> stderr-error ->
-// still-alive shape and are grouped here to make that relationship explicit. (Self-cancel via the
-// callback's cancel() argument stays allowed and is verified elsewhere.)
+// blim.subscribe is NOT guarded: it neither releases the mutex nor re-enters Lua, so from a callback
+// it is at most a brief stall — its "does not raise" subtest lives here for continuity. Each subtest
+// exercises one operation via the subscribe -> notify -> op -> return-value shape.
 func (suite *LuaApiTestSuite) TestCallbackBlockingOpGuards() {
 	suite.Run("Lua: blim.sleep inside a callback returns an error (does not raise)", func() {
 		// GOAL: Verify blim.sleep from a callback RETURNS (nil, msg) instead of a Go-side RaiseError.
