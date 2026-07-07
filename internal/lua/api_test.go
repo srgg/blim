@@ -503,12 +503,12 @@ func (suite *LuaApiTestSuite) TestCallbackBlockingOpGuards() {
 				Mode = "EveryUpdate",
 				MaxRate = 0,
 				Callback = function(record)
-					local cancel = blim.subscribe{
+					nested_cancel = blim.subscribe{
 						services = {{ service = "180d", chars = {"2a37"} }},
 						Mode = "EveryUpdate",
 						Callback = function(r) end
 					}
-					nested_ok = (cancel ~= nil)
+					nested_ok = (nested_cancel ~= nil)
 				end
 			}
 		`).
@@ -524,6 +524,9 @@ func (suite *LuaApiTestSuite) TestCallbackBlockingOpGuards() {
 		ft.MustExecuteScript(`
 			assert(nested_ok == true,
 				"blim.subscribe in a callback MUST complete and return a cancel handle, got: " .. tostring(nested_ok))
+			-- Cancel the nested subscription from the main context so the test leaves no lingering
+			-- subscription/fan-out (the subscription-cleanup diagnostic checks the value pool).
+			if nested_cancel then nested_cancel() end
 		`)
 	})
 
