@@ -1465,11 +1465,16 @@ func (api *LuaAPI) registerSleepFunction(L *lua.State) {
 			return 0
 		}
 
-		// Reentrancy guard (issue #3): blim.sleep releases stateMutex so other work runs during the
-		// wait. From inside a callback that hands the in-flight lua_State to another goroutine and
-		// corrupts it (SIGSEGV in lua_getinfo). Also covers blim.term.read_char(wait_ms), whose
-		// polling loop calls blim.sleep on every step. Fail deterministically instead of crashing.
-		api.LuaEngine.raiseIfInCallback(L, "blim.sleep")
+		// Guard (issue #3): blim.sleep releases stateMutex so other work runs during the wait; from
+		// inside a callback that hands the in-flight lua_State to another goroutine and corrupts it.
+		// Fail by RETURNING (nil, msg) BEFORE the release, not via RaiseError (a Go panic that bypasses
+		// the LuaJIT VM unwinder and corrupts the recovered lua_State). Also covers
+		// blim.term.read_char(wait_ms). (Cancellation below still raises Go-side — it is terminal.)
+		if api.LuaEngine.inCallback() {
+			L.PushNil()
+			L.PushString("blim.sleep is not allowed inside a subscribe/PTY callback; defer to the main loop")
+			return 2
+		}
 
 		// Get execution context for cancellation support
 		ctx := api.LuaEngine.scriptExecutionCtx
