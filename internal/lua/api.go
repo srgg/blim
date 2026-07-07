@@ -508,24 +508,27 @@ func (api *LuaAPI) registerSubscribeFunction(L *lua.State) {
 		// itself what corrupted the lua_State on LuaJIT (a recovered Go panic leaves the VM's cframe
 		// dangling). Making subscribe non-blocking is a separate follow-up.
 
-		// Expect a table as the first argument
+		// Wrong argument TYPE is misuse — raise, fail fast.
 		if !L.IsTable(1) {
 			L.RaiseError("Error: subscribe() expects a lua table argument")
 			return 0
 		}
 
-		// Parse the subscription table
+		// Config / runtime failures RETURN (nil, err), never RaiseError: a Go-side raise is a Go panic
+		// that corrupts the recovered lua_State when subscribe is called from a callback (issue #3).
+		// Scripts check the returned error: `local cancel, err = blim.subscribe{...}`.
 		config, err := api.parseSubscriptionTable(L, 1)
 		if err != nil {
-			L.RaiseError("Error parsing subscription config: " + err.Error())
-			return 0
+			L.PushNil()
+			L.PushString("Error parsing subscription config: " + err.Error())
+			return 2
 		}
 
-		// Execute the subscription and get cancel function
 		cancel, err := api.executeSubscription(config)
 		if err != nil {
-			L.RaiseError("Error executing subscription: " + err.Error())
-			return 0
+			L.PushNil()
+			L.PushString("Error executing subscription: " + err.Error())
+			return 2
 		}
 
 		// Return cancel function to Lua for external control
