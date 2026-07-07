@@ -1329,12 +1329,18 @@ func (api *LuaAPI) registerCharacteristicFunction(L *lua.State) {
 		// Method: read() - reads the characteristic value from the device
 		// Returns (value, nil) on success or (nil, error_message) on failure
 		api.SafePushGoFunction(L, "read", func(L *lua.State) int {
-			// Reentrancy guard (issue #3): a synchronous device read from inside a callback blocks the
-			// callback goroutine (up to the read timeout) while it holds stateMutex, freezing the main
-			// loop and every other callback, and can deadlock against the BLE event path. Unlike
-			// blim.sleep it does not release the mutex, so it is not the SIGSEGV vector — but it is
-			// still unsafe from a callback. Fail deterministically; defer device I/O to the main loop.
-			api.LuaEngine.raiseIfInCallback(L, "characteristic.read()")
+			// Guard (issue #3): a device read from inside a callback blocks the callback goroutine while
+			// holding the state, and reading a subscribed characteristic from its own callback
+			// self-deadlocks (CoreBluetooth routes the read response through the blocked notification
+			// fan-out). Fail by RETURNING (nil, msg), NOT via RaiseError: golua RaiseError is a Go panic
+			// that bypasses the LuaJIT VM unwinder and, when recovered mid-callback, corrupts the
+			// lua_State (crashing the process later). read() already reports failures as (nil, msg), so
+			// scripts handle this like any read error.
+			if api.LuaEngine.inCallback() {
+				L.PushNil()
+				L.PushString("read() is not allowed inside a subscribe/PTY callback; defer to the main loop")
+				return 2
+			}
 
 			value, err := char.Read(api.characteristicReadTimeout)
 			if err != nil {
@@ -1355,6 +1361,15 @@ func (api *LuaAPI) registerCharacteristicFunction(L *lua.State) {
 		//   - with_response: boolean (optional) - whether to wait for write response (default: true)
 		// Returns (true, nil) on success or (nil, error_message) on failure
 		api.SafePushGoFunction(L, "write", func(L *lua.State) int {
+			// Guard (issue #3): like read(), a device write from inside a callback is unsafe. Fail by
+			// RETURNING (nil, msg), not via RaiseError (a Go panic that corrupts the recovered
+			// lua_State). Checked first so it fires regardless of argument shape.
+			if api.LuaEngine.inCallback() {
+				L.PushNil()
+				L.PushString("write() is not allowed inside a subscribe/PTY callback; defer to the main loop")
+				return 2
+			}
+
 			// Validate first argument (data)
 			if !L.IsString(1) {
 				L.RaiseError("write(data, [with_response]) expects string as first argument")
@@ -1374,12 +1389,6 @@ func (api *LuaAPI) registerCharacteristicFunction(L *lua.State) {
 					withResponse = L.ToBoolean(2)
 				}
 			}
-
-			// Reentrancy guard (issue #3): like read(), a synchronous device write from inside a
-			// callback blocks the callback goroutine while holding stateMutex, freezing the engine and
-			// risking a deadlock against the BLE event path. Guarded after argument validation so a
-			// malformed call still reports the more specific argument error.
-			api.LuaEngine.raiseIfInCallback(L, "characteristic.write()")
 
 			// Use the abstracted CharacteristicWriter interface with timeout
 			err := char.Write(data, withResponse, api.characteristicWriteTimeout)
