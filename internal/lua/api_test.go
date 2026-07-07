@@ -287,22 +287,19 @@ func (suite *LuaApiTestSuite) TestErrorHandling() {
 // still-alive shape and are grouped here to make that relationship explicit. (Self-cancel via the
 // callback's cancel() argument stays allowed and is verified elsewhere.)
 func (suite *LuaApiTestSuite) TestCallbackBlockingOpGuards() {
-	suite.Run("Lua: blim.sleep inside subscription callback raises guard error", func() {
-		// GOAL: Verify blim.sleep issued from a notification callback fails with a deterministic guard
-		//       error instead of releasing the shared lua_State for concurrent, corrupting reentry (issue #3)
+	suite.Run("Lua: blim.sleep inside a callback returns an error (does not raise)", func() {
+		// GOAL: Verify blim.sleep from a callback RETURNS (nil, msg) instead of a Go-side RaiseError.
+		//       blim.sleep releases stateMutex, so an in-callback call is a true reentrancy vector — but
+		//       the guard must fail by RETURN before the release, not by RaiseError (a Go panic that
+		//       bypasses the LuaJIT VM unwinder and corrupts the recovered lua_State, crashing the
+		//       process later) (issue #3). (Cancellation, #4, still raises Go-side — it is terminal.)
 		//
-		// TEST SCENARIO: Subscribe → notification fires callback → callback calls blim.sleep → clean Lua error to stderr → engine keeps running
+		// TEST SCENARIO: Subscribe → notification fires callback → blim.sleep returns (nil, err) before
+		//                releasing the mutex → the callback completes → script observes the guard message
 
-		// Root cause: a callback runs while its goroutine holds the single lua_State via
-		// DoWithState -> stateMutex.Lock(). blim.sleep unconditionally does stateMutex.Unlock(), handing
-		// the suspended state to another DoWithState (the main loop or a second subscription); that
-		// second entry runs Lua on the same in-flight lua_State, corrupting its CallInfo and segfaulting
-		// in lua_getinfo. The real-world trigger is blim.term.read_char(wait_ms), whose 10 ms polling
-		// loop calls blim.sleep on every step (a UI redraw waiting on a keypress from a notification
-		// callback). The guard refuses to release the mutex while inCallbackCount > 0, turning the
-		// SIGSEGV into a deterministic, recoverable failure; the race-driven crash itself is not asserted.
-		suite.Connect("1").FluentLuaTest().
+		ft := suite.Connect("1").FluentLuaTest().
 			MustExecuteScript(`
+			sleep_v, sleep_err = "unset", "unset"
 			blim.subscribe{
 				services = {
 					{
@@ -313,26 +310,22 @@ func (suite *LuaApiTestSuite) TestCallbackBlockingOpGuards() {
 				Mode = "EveryUpdate",
 				MaxRate = 0,
 				Callback = function(record)
-					-- Releasing the shared lua_State mid-callback is the corruption vector.
-					blim.sleep(10)
+					sleep_v, sleep_err = blim.sleep(10)
 				end
 			}
 		`).
-			// Simulate a notification to trigger the callback
 			EmmitData(func(emitter *testutils.PeripheralDataEmitter) {
 				emitter.
 					WithService("1234").WithCharacteristic("5678", 0x01, 0x02).
 					Emit(true)
 			}).
+			Sleep(time.Millisecond * 50)
 
-			// Give it time for the async callback to execute
-			Sleep(time.Millisecond * 50).
-
-			// The guard raises a clean Lua error routed to stderr; the process MUST NOT crash.
-			ConsumeStderrAsLuaError("blim.sleep is not allowed inside a callback").
-			ExecuteScript(`print("Still working after guarded sleep")`).
-			AssertNoLuaScriptExecutionError().
-			ConsumeStdout("Still working after guarded sleep\n")
+		ft.MustExecuteScript(`
+			assert(sleep_v == nil, "blim.sleep in a callback MUST return nil, got: " .. tostring(sleep_v))
+			assert(type(sleep_err) == "string" and sleep_err:find("subscribe/PTY callback") ~= nil,
+				"blim.sleep in a callback MUST return the guard message, got: " .. tostring(sleep_err))
+		`)
 	})
 
 	suite.Run("Lua: io.read() inside a callback returns nil (does not raise)", func() {
