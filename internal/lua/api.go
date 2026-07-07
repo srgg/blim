@@ -501,13 +501,12 @@ func (api *LuaAPI) registerBlimAPI() {
 // Returns a cancel function to Lua for external subscription control.
 func (api *LuaAPI) registerSubscribeFunction(L *lua.State) {
 	api.SafePushGoFunction(L, "subscribe", func(L *lua.State) int {
-		// Reentrancy guard (issue #3): executeSubscription performs a synchronous CCCD write
-		// (client.Subscribe) to enable notifications — a blocking BLE round-trip. From inside a
-		// callback that blocks the callback goroutine while holding stateMutex and risks a deadlock
-		// with the BLE event path. Dynamic subscription from a callback is not supported; defer it to
-		// the main loop. (Self-cancel via the callback's cancel() argument stays allowed — it does not
-		// go through this path.)
-		api.LuaEngine.raiseIfInCallback(L, "blim.subscribe")
+		// NOTE (issue #3): subscribe is NOT guarded against being called from a callback. It never
+		// releases stateMutex and never re-enters Lua — its synchronous CCCD write completes via the
+		// go-ble connection-event path, independent of the notification fan-out — so from a callback it
+		// is at most a brief stall, not corruption. The previous guard raised a Go-side error, which is
+		// itself what corrupted the lua_State on LuaJIT (a recovered Go panic leaves the VM's cframe
+		// dangling). Making subscribe non-blocking is a separate follow-up.
 
 		// Expect a table as the first argument
 		if !L.IsTable(1) {
