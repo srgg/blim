@@ -106,14 +106,16 @@ func (suite *LuaApiTestSuite) TearDownTest() {
 //	The following device_test remain in Go because they test Lua syntax errors that cannot be
 //	generated through the YAML framework (which always generates valid subscription scripts)
 func (suite *LuaApiTestSuite) TestErrorHandling() {
-	suite.Run("Lua: Missing callback", func() {
-		// GOAL: Verify blim.subscribe() returns a clear error when the Callback field is missing
+	suite.Run("Lua: Missing callback returns an error", func() {
+		// GOAL: Verify blim.subscribe() RETURNS (nil, err) when the Callback field is missing, so the
+		//       script can handle it — and so a subscribe from within a callback never Go-raises (which
+		//       would corrupt the recovered lua_State) (issue #3).
 		//
-		// TEST SCENARIO: Call subscribing without Callback field → Lua error raised → verify an error message
+		// TEST SCENARIO: subscribe without Callback → returns (nil, err) mentioning the missing callback
 
 		suite.Connect("1").FluentLuaTest().
-			ExecuteScript(`
-				blim.subscribe{
+			MustExecuteScript(`
+				local cancel, err = blim.subscribe{
 					services = {
 						{
 							service = "1234",
@@ -123,10 +125,11 @@ func (suite *LuaApiTestSuite) TestErrorHandling() {
 					Mode = "EveryUpdate",
 					MaxRate = 0
 					-- Missing Callback
-				}`,
-			).
-			Sleep(time.Millisecond * 50).
-			ConsumeLuaError("Error executing subscription: subscription: no callback specified")
+				}
+				assert(cancel == nil, "subscribe MUST return a nil cancel on error, got: " .. tostring(cancel))
+				assert(type(err) == "string" and err:find("no callback specified") ~= nil,
+					"subscribe MUST return an error mentioning the missing callback, got: " .. tostring(err))
+			`)
 	})
 
 	suite.Run("Lua: Invalid argument type", func() {
@@ -247,33 +250,53 @@ func (suite *LuaApiTestSuite) TestErrorHandling() {
 		`)
 	})
 
-	ExecuteScenarios(
-		func(tc TestCase) *LuaTestableDevice {
-			if tc.Peripheral != nil {
-				suite.GivenPeripheral(tc.Peripheral)
-			}
-			return suite.Connect("1")
-		},
-		TestCase{
+	suite.Run("Lua: subscribe with no services returns an error", func() {
+		// GOAL: subscribe() with an empty services list RETURNS (nil, err), not raise (issue #3).
+		//
+		// TEST SCENARIO: subscribe with services = {} → returns (nil, err) mentioning no services
 
-			Name:         "Lua Callback: subscribe with no services specified",
-			Subscription: []*device.SubscribeOptions{},
-			ScriptError:  "subscription: no services specified",
-			Callback:     "local c", // just a boilerplate
-		},
-		TestCase{
-			Name:         "Lua Callback: subscribe with invalid service UUID",
-			Subscription: []*device.SubscribeOptions{{Service: "non-existent-service", Characteristics: []string{"non-existent-char"}}},
-			Callback:     "local c",
-			ScriptError:  "missing services: nonexistentservice",
-		},
-		TestCase{
-			Name:         "Lua Callback: subscribe with invalid characteristic UUID",
-			Subscription: []*device.SubscribeOptions{{Service: "180d", Characteristics: []string{"non-existent-char"}}},
-			Callback:     "local c",
-			ScriptError:  "missing characteristics: nonexistent",
-		},
-	)
+		suite.Connect("1").FluentLuaTest().
+			MustExecuteScript(`
+				local cancel, err = blim.subscribe{ services = {}, Mode = "EveryUpdate", Callback = function() end }
+				assert(cancel == nil, "MUST return a nil cancel, got: " .. tostring(cancel))
+				assert(type(err) == "string" and err:find("no services specified") ~= nil,
+					"MUST return a 'no services specified' error, got: " .. tostring(err))
+			`)
+	})
+
+	suite.Run("Lua: subscribe with a missing service returns an error", func() {
+		// GOAL: subscribe() to a service the device does not have RETURNS (nil, err) (issue #3).
+		//
+		// TEST SCENARIO: subscribe to a non-existent service → returns (nil, err) mentioning missing services
+
+		suite.Connect("1").FluentLuaTest().
+			MustExecuteScript(`
+				local cancel, err = blim.subscribe{
+					services = {{ service = "nonexistentservice", chars = {"nonexistentchar"} }},
+					Mode = "EveryUpdate", Callback = function() end
+				}
+				assert(cancel == nil, "MUST return a nil cancel, got: " .. tostring(cancel))
+				assert(type(err) == "string" and err:find("missing services") ~= nil,
+					"MUST return a 'missing services' error, got: " .. tostring(err))
+			`)
+	})
+
+	suite.Run("Lua: subscribe with a missing characteristic returns an error", func() {
+		// GOAL: subscribe() to a characteristic the service does not have RETURNS (nil, err) (issue #3).
+		//
+		// TEST SCENARIO: subscribe to a non-existent char → returns (nil, err) mentioning missing characteristics
+
+		suite.Connect("1").FluentLuaTest().
+			MustExecuteScript(`
+				local cancel, err = blim.subscribe{
+					services = {{ service = "180d", chars = {"nonexistent"} }},
+					Mode = "EveryUpdate", Callback = function() end
+				}
+				assert(cancel == nil, "MUST return a nil cancel, got: " .. tostring(cancel))
+				assert(type(err) == "string" and err:find("missing characteristics") ~= nil,
+					"MUST return a 'missing characteristics' error, got: " .. tostring(err))
+			`)
+	})
 }
 
 // TestCallbackBlockingOpGuards groups the issue #3 callback guards. Operations that are unsafe while
@@ -535,6 +558,50 @@ func (suite *LuaApiTestSuite) TestCallbackBlockingOpGuards() {
 				if ok then sum = sum + v end
 			end
 			assert(sum > 0, "engine MUST survive heavy protected-call work after the callback lookup")
+		`)
+	})
+
+	suite.Run("Lua: blim.subscribe() failure inside a callback returns an error (regression: no crash)", func() {
+		// GOAL: Regression — subscribe is allowed from a callback (e.g. dynamic subscription on a state
+		//       change), but when it FAILS (missing characteristic) it must RETURN (nil, err), not
+		//       RaiseError. The old Go-side raise corrupted the recovered lua_State and crashed later (issue #3).
+		//
+		// TEST SCENARIO: Subscribe → notification fires callback → callback's blim.subscribe(missing char)
+		//                returns (nil, err) → main loop runs heavy protected-call work → engine still works
+
+		ft := suite.Connect("1").FluentLuaTest().
+			MustExecuteScript(`
+			sub_err = "unset"
+			blim.subscribe{
+				services = { { service = "1234", chars = {"5678"} } },
+				Mode = "EveryUpdate",
+				MaxRate = 0,
+				Callback = function(record)
+					local cancel, err = blim.subscribe{
+						services = {{ service = "180d", chars = {"nonexistent"} }},
+						Mode = "EveryUpdate",
+						Callback = function(r) end
+					}
+					sub_err = (cancel == nil) and err or "unexpected-success"
+				end
+			}
+		`).
+			EmmitData(func(emitter *testutils.PeripheralDataEmitter) {
+				emitter.WithService("1234").WithCharacteristic("5678", 0x01, 0x02).Emit(true)
+			}).
+			Sleep(time.Millisecond * 50)
+
+		// The failing subscribe returned (nil, err) (callback completed), and heavy VM work afterwards
+		// does not crash — the state was not corrupted. On the old Go-raise code this SIGBUS'd.
+		ft.MustExecuteScript(`
+			assert(type(sub_err) == "string" and sub_err:find("missing characteristics") ~= nil,
+				"a failing blim.subscribe() in a callback MUST return (nil, err), got: " .. tostring(sub_err))
+			local sum = 0
+			for i = 1, 100000 do
+				local ok, v = blim.pcall(function() return i end)
+				if ok then sum = sum + v end
+			end
+			assert(sum > 0, "engine MUST survive heavy protected-call work after the callback subscribe")
 		`)
 	})
 }

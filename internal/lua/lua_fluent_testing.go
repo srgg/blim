@@ -984,7 +984,7 @@ func (tc TestCase) LuaTestScript() (string, error) {
 local json = require("json")
 callNo = 0
 
-blim.subscribe{
+local __cancel, __sub_err = blim.subscribe{
     services = {
         {{- range .SubscribeOptions }}
         {
@@ -1016,6 +1016,9 @@ blim.subscribe{
 	{{- end }}
 	end
 }
+-- subscribe now returns (nil, err) on failure; re-raise it so error scenarios still surface as a
+-- script error (a Lua-side error(), which is safe — unlike a Go-side RaiseError).
+if __sub_err then error(__sub_err) end
 `
 	script := tc.Script
 	if len(tc.Script) == 0 {
