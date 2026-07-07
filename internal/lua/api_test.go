@@ -497,6 +497,51 @@ func (suite *LuaApiTestSuite) TestCallbackBlockingOpGuards() {
 	})
 }
 
+// TestCallbackGuardSurvivesHeavyVMWork verifies that after a callback invokes a guarded op — which
+// now fails by RETURN — the shared lua_State stays intact for heavy subsequent VM work. The previous
+// Go-side RaiseError guard corrupted the state on LuaJIT: golua RaiseError is a Go panic that
+// bypasses the VM unwinder, so when it is recovered mid-callback the VM's cframe/base/top are left
+// dangling and the process only crashes LATER, under real work. That is exactly what the original
+// (green) guard tests missed — they did almost no VM work after the raise (issue #3 reopen).
+func (suite *LuaApiTestSuite) TestCallbackGuardSurvivesHeavyVMWork() {
+	// GOAL: A callback's guarded op returns cleanly and leaves the lua_State usable for heavy later
+	//       work — no corruption, no delayed crash.
+	//
+	// TEST SCENARIO: Subscribe → notification fires callback → callback calls blim.sleep (guard
+	//                returns nil, err) → main loop runs 100k protected calls → engine still works
+
+	ft := suite.Connect("1").FluentLuaTest().
+		MustExecuteScript(`
+			guard_err = nil
+			blim.subscribe{
+				services = { { service = "1234", chars = {"5678"} } },
+				Mode = "EveryUpdate",
+				MaxRate = 0,
+				Callback = function(record)
+					local _, err = blim.sleep(1)   -- guarded op from a callback: returns (nil, err)
+					guard_err = err
+				end
+			}
+		`).
+		EmmitData(func(emitter *testutils.PeripheralDataEmitter) {
+			emitter.WithService("1234").WithCharacteristic("5678", 0x01, 0x02).Emit(true)
+		}).
+		Sleep(time.Millisecond * 50)
+
+	// The guarded op returned (proving the callback ran it), and heavy VM work afterwards does not
+	// crash — the state was not corrupted. On the old Go-raise guard this loop SIGBUS'd.
+	ft.MustExecuteScript(`
+		assert(type(guard_err) == "string" and guard_err:find("subscribe/PTY callback") ~= nil,
+			"the callback's guarded op MUST have returned a guard error, got: " .. tostring(guard_err))
+		local sum = 0
+		for i = 1, 100000 do
+			local ok, v = blim.pcall(function() return i end)
+			if ok then sum = sum + v end
+		end
+		assert(sum > 0, "engine MUST survive heavy protected-call work after a callback guarded op")
+	`)
+}
+
 // TestSubscriptionScenarios validates BLE subscription behavior across multiple streaming modes
 // by executing YAML-defined test scenarios.
 //
