@@ -394,8 +394,14 @@ func (d *SubscriptionDiagnostics) verifyExplicitCancel() {
 	// NOTE: Goroutine delta check removed - unreliable in multi-subscription scenarios.
 	// Other subscriptions created after this one have legitimate goroutines.
 
-	// BLEValue pool check - outstanding shouldn't increase
-	if d.conn != nil {
+	// BLEValue pool check - outstanding shouldn't increase.
+	// Only meaningful when this is the SOLE subscription on the connection: the value pool is shared
+	// per-connection, so with 2+ subscriptions the outstanding count picks up values that OTHER
+	// subscriptions' in-flight notifications allocated during this teardown window — a false positive
+	// (the same multi-subscription unreliability that retired the goroutine-delta check above). For
+	// multi-subscription connections the leak is caught by VerifyDisconnectCleanup's
+	// blevalue_pool_disconnect check, which runs after CancelAll + Wait (no concurrent allocators).
+	if d.conn != nil && d.conn.ConnDiag != nil && d.conn.ConnDiag.SubscriptionCount() == 1 {
 		outstanding := d.conn.valuePool.Outstanding()
 		if outstanding > d.ValuesBeforeCancel {
 			errors = append(errors, CleanupError{"blevalue_pool",
@@ -488,6 +494,15 @@ func newConnectionDiagnostics(conn *BLEConnection) *ConnectionDiagnostics {
 
 func (cd *ConnectionDiagnostics) OutstandingValues() int64 {
 	return cd.connection.valuePool.Outstanding()
+}
+
+// SubscriptionCount returns how many subscriptions were created on this connection. Used to gate the
+// per-subscription value-pool check to single-subscription scenarios (the pool is shared per
+// connection, so with 2+ subscriptions the check cannot attribute outstanding values to one of them).
+func (cd *ConnectionDiagnostics) SubscriptionCount() int {
+	cd.mu.Lock()
+	defer cd.mu.Unlock()
+	return len(cd.Subscriptions)
 }
 
 func (cd *ConnectionDiagnostics) ValuesHighWaterMark() int64 {
