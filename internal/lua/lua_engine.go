@@ -190,26 +190,12 @@ func (e *LuaEngine) enterCallback() { e.inCallbackCount.Add(1) }
 // exitCallback marks that a callback's L.Call() has finished (or unwound via panic).
 func (e *LuaEngine) exitCallback() { e.inCallbackCount.Add(-1) }
 
-// inCallback reports whether the currently executing Lua context is a callback. Valid as an
-// "in callback" indicator only because execution is serialized by stateMutex and callbacks never
-// release it (the mutex-releasing primitives are guarded by raiseIfInCallback).
+// inCallback reports whether the currently executing Lua context is a callback (BLE subscription or
+// PTY data). Valid as an "in callback" indicator because execution is serialized by stateMutex.
+// Primitives that are unsafe inside a callback consult this and fail by RETURNING an error value
+// (nil, msg) — never via a Go-side RaiseError, which is a Go panic that bypasses the LuaJIT VM
+// unwinder and corrupts the recovered lua_State (GH issue #3).
 func (e *LuaEngine) inCallback() bool { return e.inCallbackCount.Load() > 0 }
-
-// raiseIfInCallback is the single chokepoint for primitives that are unsafe to run inside a
-// callback — either because they release stateMutex mid-call (blim.sleep, io.read: reentering the
-// in-flight state corrupts it) or because they block the callback goroutine while holding the state
-// (characteristic.read/write: freeze the engine and risk deadlock). When called from inside a
-// callback it raises a clean Lua error (via panic caught by the callback's protected L.Call). op is
-// the primitive's name for the message, e.g. "blim.sleep", "io.read", "characteristic.read()".
-//
-// IMPORTANT: when in a callback this PANICS (L.RaiseError) and does NOT return; callers must treat
-// it as a control-flow break. Returns normally only when not in a callback.
-func (e *LuaEngine) raiseIfInCallback(L *lua.State, op string) {
-	if e.inCallbackCount.Load() > 0 {
-		// Covers both BLE subscription and PTY data callbacks (both bump inCallbackCount).
-		L.RaiseError(op + " is not allowed inside a callback; defer to the main loop")
-	}
-}
 
 // NewLuaEngine creates a new Lua engine with full stdout/stderr capture using the default channel capacity
 func NewLuaEngine(logger *logrus.Logger) *LuaEngine {

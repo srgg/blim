@@ -450,16 +450,18 @@ func (suite *LuaApiTestSuite) TestCallbackBlockingOpGuards() {
 		`)
 	})
 
-	suite.Run("Lua: blim.subscribe inside subscription callback raises guard error", func() {
-		// GOAL: Verify a dynamic subscription from a notification callback fails with the guard — its
-		//       synchronous CCCD write would block the callback goroutine while holding the state (issue #3)
+	suite.Run("Lua: blim.subscribe inside a callback is allowed (does not raise)", func() {
+		// GOAL: Verify blim.subscribe from a callback is NOT guarded. Its guard raise (a Go-side
+		//       RaiseError) is exactly what corrupted the lua_State on LuaJIT and crashed the process
+		//       (issue #3 reopen). subscribe never releases the mutex and never re-enters Lua — from a
+		//       callback it is at most a brief stall, not corruption — so it needs no guard.
 		//
-		// TEST SCENARIO: Subscribe → notification fires callback → callback calls blim.subscribe → clean Lua error to stderr → engine keeps running
+		// TEST SCENARIO: Subscribe → notification fires callback → callback calls blim.subscribe →
+		//                it returns a cancel handle → the callback completes cleanly
 
-		// blim.subscribe -> executeSubscription -> client.Subscribe is a blocking BLE round-trip; the
-		// guard short-circuits before it. Self-cancel via the callback's cancel() arg stays allowed.
-		suite.Connect("1").FluentLuaTest().
+		ft := suite.Connect("1").FluentLuaTest().
 			MustExecuteScript(`
+			nested_ok = "unset"
 			blim.subscribe{
 				services = {
 					{
@@ -470,11 +472,12 @@ func (suite *LuaApiTestSuite) TestCallbackBlockingOpGuards() {
 				Mode = "EveryUpdate",
 				MaxRate = 0,
 				Callback = function(record)
-					blim.subscribe{
+					local cancel = blim.subscribe{
 						services = {{ service = "180d", chars = {"2a37"} }},
 						Mode = "EveryUpdate",
 						Callback = function(r) end
 					}
+					nested_ok = (cancel ~= nil)
 				end
 			}
 		`).
@@ -483,11 +486,14 @@ func (suite *LuaApiTestSuite) TestCallbackBlockingOpGuards() {
 					WithService("1234").WithCharacteristic("5678", 0x01, 0x02).
 					Emit(true)
 			}).
-			Sleep(time.Millisecond * 50).
-			ConsumeStderrAsLuaError("blim.subscribe is not allowed inside a callback").
-			ExecuteScript(`print("Still working after guarded subscribe")`).
-			AssertNoLuaScriptExecutionError().
-			ConsumeStdout("Still working after guarded subscribe\n")
+			Sleep(time.Millisecond * 50)
+
+		// subscribe from the callback returned a non-nil cancel handle (the callback ran to
+		// completion), rather than raising. On the buggy guard code it aborted and left it "unset".
+		ft.MustExecuteScript(`
+			assert(nested_ok == true,
+				"blim.subscribe in a callback MUST complete and return a cancel handle, got: " .. tostring(nested_ok))
+		`)
 	})
 }
 
