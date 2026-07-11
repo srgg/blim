@@ -4,8 +4,6 @@ github.com/JuulLabs-OSS/cbgo v0.0.2 h1:gCDyT0+EPuI8GOFyvAksFcVD2vF4CXBAVwT6uVnD9
 github.com/JuulLabs-OSS/cbgo v0.0.2/go.mod h1:L4YtGP+gnyD84w7+jN66ncspFRfOYB5aj9QSXaFHmBA=
 github.com/Masterminds/semver/v3 v3.4.0 h1:Zog+i5UMtVoCU8oKka5P7i9q9HgrJeGzI9SA1Xbatp0=
 github.com/Masterminds/semver/v3 v3.4.0/go.mod h1:4V+yj/TJE1HU9XfppCwVMZq3I84lprf4nC11bSS5beM=
-github.com/aarzilli/golua v0.0.0-20250217091409-248753f411c4 h1:gW5i3FQAMcbkNgo/A87gCKAbBMalAO8BlPIMo9Gk2Ow=
-github.com/aarzilli/golua v0.0.0-20250217091409-248753f411c4/go.mod h1:hMjfaJVSqVnxenMlsxrq3Ni+vrm9Hs64tU4M7dhUoO4=
 github.com/bahlo/generic-list-go v0.2.0 h1:5sz/EEAK+ls5wF+NeqDpk5+iNdMDXrh3z3nPnH1Wvgk=
 github.com/bahlo/generic-list-go v0.2.0/go.mod h1:2KvAjgMlE5NNynlg/5iLrrCCZ2+5xWbdbCW3pNTGyYg=
 github.com/buger/jsonparser v1.1.1 h1:2PnMjfWD7wBILjqQbt530v576A/cAbQvEW9gGIpYMUs=
@@ -118,6 +116,8 @@ github.com/spf13/pflag v1.0.10 h1:4EBh2KAYBwaONj6b2Ye1GiHfwjqyROoF4RwYO+vPwFk=
 github.com/spf13/pflag v1.0.10/go.mod h1:McXfInJRrz4CZXVZOBLb0bTZqETkiAhM9Iw0y3An2Bg=
 github.com/srgg/go-ble v0.0.0-20251019021511-162008c817dc h1:IPzoNDopZMIx5I1G4D7mYVTWIRs+XLwHwF8NdkStJec=
 github.com/srgg/go-ble v0.0.0-20251019021511-162008c817dc/go.mod h1:fFJl/jD/uyILGBeD5iQ8tYHrPlJafyqCJzAyTHNJ1Uk=
+github.com/srgg/golua v0.0.0-20260711032905-079ae1619b57 h1:cRqJHUU/mrwWCcopr4bkwNZuTcBplfzLw7shRTz9rYU=
+github.com/srgg/golua v0.0.0-20260711032905-079ae1619b57/go.mod h1:hMjfaJVSqVnxenMlsxrq3Ni+vrm9Hs64tU4M7dhUoO4=
 github.com/srgg/testify v0.1.1 h1:bACKnk/Q/nlAIF0kl+ClPoOthkzpFPrEu4XGUh0KloA=
 github.com/srgg/testify v0.1.1/go.mod h1:K8P8wD8LFzCYHx9vj2QUIVO9hG4akhipoaLty94NGaw=
 github.com/stretchr/objx v0.1.0/go.mod h1:HFkY916IF+rwdDfMAkV7OtwuqBVzrE8GR6GFx+wExME=

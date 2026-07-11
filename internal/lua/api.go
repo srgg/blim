@@ -504,9 +504,10 @@ func (api *LuaAPI) registerSubscribeFunction(L *lua.State) {
 		// NOTE (issue #3): subscribe is NOT guarded against being called from a callback. It never
 		// releases stateMutex and never re-enters Lua — its synchronous CCCD write completes via the
 		// go-ble connection-event path, independent of the notification fan-out — so from a callback it
-		// is at most a brief stall, not corruption. The previous guard raised a Go-side error, which is
-		// itself what corrupted the lua_State on LuaJIT (a recovered Go panic leaves the VM's cframe
-		// dangling). Making subscribe non-blocking is a separate follow-up.
+		// is at most a brief stall. Making subscribe non-blocking is a separate follow-up.
+		// HISTORY: an earlier guard here raised a Go-side error, which on the then-broken golua
+		// corrupted the VM (a recovered Go panic left the cframe chain dangling); the golua fork
+		// contains panics at the cgo boundary now (upstream PR aarzilli/golua#131).
 
 		// Wrong argument TYPE is misuse — raise, fail fast.
 		if !L.IsTable(1) {
@@ -514,9 +515,10 @@ func (api *LuaAPI) registerSubscribeFunction(L *lua.State) {
 			return 0
 		}
 
-		// Config / runtime failures RETURN (nil, err), never RaiseError: a Go-side raise is a Go panic
-		// that corrupts the recovered lua_State when subscribe is called from a callback (issue #3).
-		// Scripts check the returned error: `local cancel, err = blim.subscribe{...}`.
+		// Config / runtime failures RETURN (nil, err), never RaiseError: runtime failures are
+		// expected, queryable conditions — the error-convention matrix (misuse ⇒ raise, runtime
+		// failure ⇒ (nil, err)). Scripts check the returned error:
+		// `local cancel, err = blim.subscribe{...}`.
 		config, err := api.parseSubscriptionTable(L, 1)
 		if err != nil {
 			L.PushNil()
@@ -979,31 +981,18 @@ func (api *LuaAPI) callPTYDataCallback(callbackRef int, data []byte) error {
 				Source:    "stderr",
 			})
 
-			// DANGEROUS - DO NOT DO THIS:
-			// Attempting to clean up Lua state after panic is unsafe because:
-			// 1. SIGSEGV from Lua FFI code means the Lua VM is corrupted
-			// 2. Calling L.SetTop(0) on corrupted state → another SIGSEGV
-			// 3. Go's recover() cannot catch SIGSEGV - process will crash
-			// 4. When L.Call() returns error normally, stack is already cleaned
-			//
-			// OLD DANGEROUS CODE (commented out):
-			// api.LuaEngine.DoWithState(func(L *lua.State) interface{} {
-			//     L.SetTop(0) // ← SIGSEGV if state is corrupted
-			//     return nil
-			// })
+			// No state cleanup here: when L.Call returns an error the stack is
+			// already unwound (and restored below at the call site); a panic
+			// reaching this recover is an invariant violation to be reported,
+			// not repaired. (Historically the VM could be corrupted at this
+			// point — golua let Go panics unwind across in-flight VM frames;
+			// fixed in the fork, upstream PR aarzilli/golua#131.)
 
 			// DO NOT re-panic - allow PTY reading to continue
 		}
 	}()
 
 	api.LuaEngine.DoWithState(func(L *lua.State) interface{} {
-		// Inner panic handler: catches panics from L.Call() (including StackTrace crashes)
-		defer func() {
-			if r := recover(); r != nil {
-				// Re-panic to outer handler for cleanup
-				panic(r)
-			}
-		}()
 
 		// Save stack position before pushing callback items.
 		// On error, we restore to this position (not 0) to preserve any stack frames
@@ -1083,30 +1072,18 @@ func (api *LuaAPI) callLuaCallback(callbackRef int, record *device.Record, cance
 				Source:    "stderr",
 			})
 
-			// DANGEROUS - DO NOT DO THIS:
-			// Attempting to clean up Lua state after panic is unsafe because:
-			// 1. SIGSEGV from Lua FFI code means the Lua VM is corrupted
-			// 2. Calling L.SetTop(0) on corrupted state → another SIGSEGV
-			// 3. Go's recover() cannot catch SIGSEGV - process will crash
-			// 4. When L.Call() returns error normally, stack is already cleaned
-			//
-			// OLD DANGEROUS CODE (commented out):
-			// api.LuaEngine.DoWithState(func(L *lua.State) interface{} {
-			//     L.SetTop(0) // ← SIGSEGV if state is corrupted
-			//     return nil
-			// })
+			// No state cleanup here: when L.Call returns an error the stack is
+			// already unwound (and restored below at the call site); a panic
+			// reaching this recover is an invariant violation to be reported,
+			// not repaired. (Historically the VM could be corrupted at this
+			// point — golua let Go panics unwind across in-flight VM frames;
+			// fixed in the fork, upstream PR aarzilli/golua#131.)
 
 			// DO NOT re-panic - allow other subscriptions to continue
 		}
 	}()
 
 	api.LuaEngine.DoWithState(func(L *lua.State) interface{} {
-		defer func() {
-			if r := recover(); r != nil {
-				// Re-panic to outer handler for cleanup
-				panic(r)
-			}
-		}()
 
 		// Save stack position before pushing callback items.
 		// On error, we restore to this position (not 0) to preserve any stack frames
@@ -1225,8 +1202,6 @@ func (api *LuaAPI) registerCharacteristicFunction(L *lua.State) {
 
 		// Not-found / no-connection are expected, queryable RUNTIME conditions, not errors: RETURN nil
 		// so scripts can do `local char = blim.characteristic(...); if char then ... end` (issue #3).
-		// Raising here (a Go panic) also corrupts the recovered lua_State when this is called from a
-		// callback, which was a crash path; returning nil avoids that entirely.
 		connection := api.device.GetConnection()
 		if connection == nil {
 			L.PushNil()
@@ -1336,10 +1311,8 @@ func (api *LuaAPI) registerCharacteristicFunction(L *lua.State) {
 			// Guard (issue #3): a device read from inside a callback blocks the callback goroutine while
 			// holding the state, and reading a subscribed characteristic from its own callback
 			// self-deadlocks (CoreBluetooth routes the read response through the blocked notification
-			// fan-out). Fail by RETURNING (nil, msg), NOT via RaiseError: golua RaiseError is a Go panic
-			// that bypasses the LuaJIT VM unwinder and, when recovered mid-callback, corrupts the
-			// lua_State (crashing the process later). read() already reports failures as (nil, msg), so
-			// scripts handle this like any read error.
+			// fan-out). Fail by RETURNING (nil, msg): read() already reports failures as (nil, msg),
+			// so scripts handle this like any read error.
 			if api.LuaEngine.inCallback() {
 				L.PushNil()
 				L.PushString("read() is not allowed inside a subscribe/PTY callback; defer to the main loop")
@@ -1365,9 +1338,10 @@ func (api *LuaAPI) registerCharacteristicFunction(L *lua.State) {
 		//   - with_response: boolean (optional) - whether to wait for write response (default: true)
 		// Returns (true, nil) on success or (nil, error_message) on failure
 		api.SafePushGoFunction(L, "write", func(L *lua.State) int {
-			// Guard (issue #3): like read(), a device write from inside a callback is unsafe. Fail by
-			// RETURNING (nil, msg), not via RaiseError (a Go panic that corrupts the recovered
-			// lua_State). Checked first so it fires regardless of argument shape.
+			// Guard (issue #3): like read(), a device write from inside a callback is unsafe
+			// (blocks the callback goroutine while holding the state; self-deadlock risk). Fail by
+			// RETURNING (nil, msg) like any write error. Checked first so it fires regardless of
+			// argument shape.
 			if api.LuaEngine.inCallback() {
 				L.PushNil()
 				L.PushString("write() is not allowed inside a subscribe/PTY callback; defer to the main loop")
@@ -1458,12 +1432,11 @@ func (api *LuaAPI) registerCharacteristicFunction(L *lua.State) {
 func (api *LuaAPI) registerSleepFunction(L *lua.State) {
 	api.SafePushGoFunction(L, "sleep", func(L *lua.State) int {
 		// Guard (issue #3): blim.sleep releases stateMutex so other work runs during the wait; from
-		// inside a callback that hands the in-flight lua_State to another goroutine and corrupts it.
-		// Fail by RETURNING (nil, msg) BEFORE the release, not via RaiseError (a Go panic that bypasses
-		// the LuaJIT VM unwinder and corrupts the recovered lua_State). Checked FIRST so a bad-argument
-		// call from a callback also returns cleanly instead of hitting the argument-validation raise
-		// below. Also covers blim.term.read_char(wait_ms). (Cancellation below still raises Go-side —
-		// it is terminal.)
+		// inside a callback that hands the in-flight lua_State to another goroutine and corrupts it
+		// (the mutex-reentrancy vector — a blim architecture constraint until the RFC-002 actor).
+		// Fail by RETURNING (nil, msg) BEFORE the release. Checked FIRST so a bad-argument call from
+		// a callback also returns cleanly instead of hitting the argument-validation raise below.
+		// Also covers blim.term.read_char(wait_ms).
 		if api.LuaEngine.inCallback() {
 			L.PushNil()
 			L.PushString("blim.sleep is not allowed inside a subscribe/PTY callback; defer to the main loop")
@@ -1488,8 +1461,8 @@ func (api *LuaAPI) registerSleepFunction(L *lua.State) {
 		// Release mutex to allow callbacks to execute during the wait.
 		// Re-lock EXPLICITLY (not via defer) before any RaiseError below: RaiseError walks the Lua
 		// stack (StackTrace -> lua_getinfo), which is unsafe while the mutex is released — it races
-		// callback goroutines on the same lua_State (the corruption class of #3). Keep the window
-		// between Unlock and Lock free of any early return or panic.
+		// callback goroutines on the same lua_State (the mutex-reentrancy class of #3). Keep the
+		// window between Unlock and Lock free of any early return or panic.
 		api.LuaEngine.stateMutex.Unlock()
 		cancelled := false
 		if ctx != nil {
@@ -1507,9 +1480,11 @@ func (api *LuaAPI) registerSleepFunction(L *lua.State) {
 
 		// Deterministic cancellation (issue #4): raise here instead of relying on the debug count
 		// hook, which LuaJIT never invokes inside compiled traces — an FFI-hot loop would otherwise
-		// spin forever after Ctrl+C (blim.sleep used to just return on ctx.Done). This Go-side raise
-		// is not catchable by Lua pcall (Go-backed errors abort by design), so scripts cannot swallow
-		// it; safeExecuteScript maps the "cancelled" message to context.Canceled.
+		// spin forever after Ctrl+C (blim.sleep used to just return on ctx.Done). NOTE: since the
+		// golua panic-containment fix (upstream PR aarzilli/golua#131) this raise IS catchable by
+		// Lua pcall — a script that swallows it degrades to safeExecuteScript's cancellation grace
+		// timeout (the issue-#4 backstop); sticky cancellation arrives with RFC-002.
+		// safeExecuteScript maps the "cancelled" message to context.Canceled.
 		if cancelled {
 			api.logger.Debug("[blim.sleep] interrupted by context cancellation")
 			L.RaiseError("script execution cancelled")
@@ -1521,12 +1496,13 @@ func (api *LuaAPI) registerSleepFunction(L *lua.State) {
 }
 
 // NOTE: blim.pcall is deliberately NOT a Go-registered function (it lives in
-// blim.lua as LuaJIT's native pcall). golua raises errors as Go panics
-// (RaiseError, golua_default_msghandler) that are recoverable ONLY at the
-// outermost golua entry point (DoString/Call): recovering them in a nested
-// Go function abandons live LuaJIT C frames and leaves the state's cframe
-// chain dangling — SIGSEGV on the next throw or lua_close. Do not reintroduce
-// a Go-side protected call unless golua's error architecture changes.
+// blim.lua as LuaJIT's native pcall) — the native pcall is the correct tool
+// and needs no Go round-trip. HISTORY: golua used to raise errors as Go
+// panics that were recoverable only at the outermost entry point (recovering
+// them in a nested Go function abandoned live LuaJIT C frames — SIGSEGV on
+// the next throw or lua_close); the golua fork now contains panics at the
+// cgo boundary (upstream PR aarzilli/golua#131), which is also why the
+// native pcall safely catches Go-backed errors.
 
 // pushDescriptor pushes a descriptor object onto the Lua stack as a table.
 // Creates a table with uuid, handle, index, name, value, and parsed_value fields.
