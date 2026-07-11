@@ -12,14 +12,18 @@ blim.device = native.device
 blim.bridge = native.bridge
 blim.sleep = native.sleep
 
--- Protected call for Lua/C code. The stock pcall/xpcall are hidden in this
--- sandbox (golua renames pcall to unsafe_pcall: its longjmp cannot cross Go
--- frames); blim.pcall is LuaJIT's native pcall and safely catches errors
--- raised by Lua code and C built-ins (error(), ffi.cdef conflicts, ...).
--- LIMITATION: errors raised by Go-backed functions (require, blim.*) are Go
--- panics — they are NOT catchable and abort the script by design.
--- (In stock LuaJIT outside the sandbox this is just pcall.)
-blim.pcall = pcall or unsafe_pcall
+-- Protected calls. golua hides the stock pcall/xpcall (renaming them to
+-- unsafe_pcall/unsafe_xpcall) because Go panics used to bypass them and
+-- corrupt the VM; since the golua panic-containment fix (upstream PR
+-- aarzilli/golua#131) Go panics are contained at the cgo boundary and
+-- re-raised as regular Lua errors, so the natives are safe again. Restore
+-- the standard globals: scripts get plain Lua semantics — pcall/xpcall catch
+-- errors from Lua code, C built-ins AND Go-backed functions (require,
+-- blim.*). blim.pcall is a DEPRECATED backward-compatible alias — use the
+-- standard pcall; the alias will be removed in a future release.
+pcall = pcall or unsafe_pcall
+xpcall = xpcall or unsafe_xpcall
+blim.pcall = pcall
 
 
 

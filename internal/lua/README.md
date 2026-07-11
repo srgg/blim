@@ -1004,35 +1004,41 @@ local err = blim.write_receive_async{
 
 ---
 
-### `blim.pcall(f, ...)` → `ok, ...`
+### `pcall(f, ...)` / `xpcall(f, handler, ...)` — standard; `blim.pcall` is an alias
 
-Protected call — the sandbox substitute for Lua's standard `pcall`, which is
-removed (its longjmp-based unwinding cannot cross Go call frames safely).
+The standard Lua `pcall`/`xpcall` are available and behave normally. They
+catch errors raised by Lua code, C built-ins (`error()`, `ffi.cdef`, ...)
+**and Go-backed API functions** (`require`, characteristic methods, ...):
+since the golua panic-containment fix (upstream PR aarzilli/golua#131), Go
+panics are contained at the cgo boundary and re-raised as regular Lua errors,
+so protected calls work end-to-end and the VM stays intact afterwards.
 
-**Parameters:**
-- `f` (function) - Function to call
-- `...` - Arguments passed to `f`
+`blim.pcall` is a **deprecated** backward-compatible alias for `pcall` and
+will be removed in a future release — use the standard `pcall` (historically
+the natives were hidden because Go panics bypassed them unsafely).
 
-**Returns:**
-- On success: `true` followed by all of `f`'s return values
-- On failure: `false` followed by the error message
+**Note:** most `blim.*` runtime failures are still *returned* as `nil, err`
+rather than raised — check return values first; protected calls are for
+misuse errors (wrong argument types) and third-party code.
 
-**Limitation:** `blim.pcall` catches errors raised by Lua code and C built-ins
-(`error()`, `ffi.cdef`, ...). Errors raised by **Go-backed API functions**
-(`require`, `blim.subscribe`, `blim.characteristic`, ...) are Go-side panics and
-are **not** catchable — they abort the script by design. Handle those via the
-`nil, err` return values those functions already provide, not `blim.pcall`.
+**Note:** script cancellation (Ctrl+C) is delivered as a catchable error; a
+script that swallows it in a `pcall` loop falls back to the engine's
+cancellation grace timeout instead of stopping at the next yield point.
 
 **Example:**
 ```lua
 -- Catch a Lua-level error
-local ok, err = blim.pcall(function() error("boom") end)
+local ok, err = pcall(function() error("boom") end)
 if not ok then
     print("caught:", err)  -- caught: ...: boom
 end
 
+-- Catch a Go-backed error
+local ok, err = pcall(require, "missing_module")
+assert(ok == false and tostring(err):find("missing_module"))
+
 -- Forward return values on success
-local ok, sum = blim.pcall(function(a, b) return a + b end, 2, 3)
+local ok, sum = pcall(function(a, b) return a + b end, 2, 3)
 assert(ok and sum == 5)
 ```
 
@@ -1152,7 +1158,7 @@ Both approaches will coexist - use whichever fits your use case.
 - ✅ **Subscriptions** - `blim.subscribe()` supports notifications/indications with multiple streaming modes
 - ✅ **Subscription cancellation** - `blim.subscribe()` returns cancel function; callback receives cancel for self-cancellation
 - ✅ **PTY bridge** - `blim.bridge.pty_write()`, `pty_read()`, and `pty_on_data()` for async PTY communication
-- ✅ **Protected calls** - `blim.pcall()` catches Lua/C errors (Go-backed errors abort by design)
+- ✅ **Protected calls** - standard `pcall`/`xpcall` catch Lua, C and Go-backed errors (`blim.pcall` kept as alias)
 - ✅ **Interactive terminal** - `blim.term` raw mode and single-keypress input for interactive bridge scripts
 
 **⚠️ Planned features:**
@@ -1229,7 +1235,7 @@ All Go functions exposed to Lua are wrapped:
 - ✅ `blim.bridge.pty_read()` (bridge PTY read)
 - ✅ `blim.bridge.pty_on_data(callback)` (bridge PTY async callback)
 - ✅ `blim.sleep()` (utility function for delays)
-- ✅ `blim.pcall()` (protected call for Lua/C errors)
+- ✅ `pcall()` / `xpcall()` (standard protected calls; `blim.pcall` is an alias)
 - ✅ `blim.term.enable_raw()` / `disable_raw()` / `read_char()` (interactive terminal input)
 
 **Engine Functions (`lua_engine.go`):**

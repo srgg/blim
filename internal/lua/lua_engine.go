@@ -169,7 +169,8 @@ type LuaEngine struct {
 	// (BLE subscription callbacks + PTY data callbacks). Because execution is serialized by
 	// stateMutex, only one goroutine runs Lua at a time, so >0 means "the current Lua executor is
 	// inside a callback". Two consumers rely on this:
-	//   - the shutdown hook skips RaiseError while >0 (an async raise from a debug hook is unsafe);
+	//   - the shutdown hook skips RaiseError while >0 (do not abort a user callback mid-flight;
+	//     it finishes and the raise happens at the next main-loop tick);
 	//   - mutex-releasing primitives (blim.sleep, io.read) refuse to release while >0, since handing
 	//     the in-flight state to another DoWithState reenters it from another goroutine and corrupts
 	//     it (SIGSEGV in lua_getinfo — issue #3 / RFC-001).
@@ -192,9 +193,9 @@ func (e *LuaEngine) exitCallback() { e.inCallbackCount.Add(-1) }
 
 // inCallback reports whether the currently executing Lua context is a callback (BLE subscription or
 // PTY data). Valid as an "in callback" indicator because execution is serialized by stateMutex.
-// Primitives that are unsafe inside a callback consult this and fail by RETURNING an error value
-// (nil, msg) — never via a Go-side RaiseError, which is a Go panic that bypasses the LuaJIT VM
-// unwinder and corrupts the recovered lua_State (GH issue #3).
+// Primitives that are unsafe inside a callback (mutex-release reentrancy / self-deadlock, issue #3)
+// consult this and fail by RETURNING an error value (nil, msg), matching each primitive's normal
+// failure shape so scripts handle it uniformly.
 func (e *LuaEngine) inCallback() bool { return e.inCallbackCount.Load() > 0 }
 
 // NewLuaEngine creates a new Lua engine with full stdout/stderr capture using the default channel capacity
@@ -543,10 +544,9 @@ func (e *LuaEngine) registerIOReadContextAwareInternal() {
 				}
 
 				// Reentrancy guard (issue #3): io.read releases stateMutex to block. From inside a
-				// callback that would hand the in-flight lua_State to another goroutine and corrupt it.
-				// Fail by RETURNING (nil, msg) — io.read-style — BEFORE the mutex release, not via
-				// RaiseError: golua RaiseError is a Go panic that bypasses the VM unwinder and corrupts
-				// the recovered lua_State (crashing the process later). Scripts handle this like EOF.
+				// callback that would hand the in-flight lua_State to another goroutine and corrupt it
+				// (a blim architecture constraint until the RFC-002 actor). Fail by RETURNING
+				// (nil, msg) — io.read-style — BEFORE the mutex release. Scripts handle this like EOF.
 				if e.inCallback() {
 					L.PushNil()
 					L.PushString("io.read() is not allowed inside a subscribe/PTY callback; defer to the main loop")
@@ -629,8 +629,10 @@ func (e *LuaEngine) PreloadLuaLibrary(libraryCode, libraryName, errorContext str
 		}
 
 		// Execute the chunk to get the module table. On failure the error message
-		// stays on the stack; it MUST be popped, otherwise every later script error
-		// walks a corrupted stack (LUA_ERRERR or SIGSEGV in lua_getinfo).
+		// stays on the stack; it MUST be popped to keep the persistent stack
+		// balanced. (The LUA_ERRERR/SIGSEGV crashes once blamed on this were the
+		// golua panic-crossing corruption, fixed in the fork — PR aarzilli/golua#131 —
+		// but the stack hygiene requirement stands.)
 		if err := L.Call(0, 1); err != nil {
 			L.Pop(1)
 			return fmt.Errorf("failed to execute embedded %s: %w", errorContext, err)
@@ -961,18 +963,20 @@ func (e *LuaEngine) Close() {
 		e.logger.Debug("[LuaEngine.Close] clearing debug hook...")
 		e.state.SetHook(func(*lua.State) {}, 0)
 
-		// TEMPORARILY DISABLED: GC calls moved crash earlier, suggesting corruption happens before close
-		// // Run full GC cycle while state is still valid. This ensures all __gc
-		// // finalizers (for Go functions registered via PushGoFunction) run while
-		// // the Lua registry is intact. Without this, lua_close() runs finalizers
-		// // during teardown, when the registry is partially destroyed, causing
-		// // gchook_wrapper to crash when accessing LUA_REGISTRYINDEX.
-		// e.logger.Debug("[LuaEngine.Close] running full GC cycle...")
-		// e.state.GC(lua.LUA_GCCOLLECT, 0)
+		// Run a full GC cycle while the state is still valid, so all __gc
+		// finalizers (for Go functions registered via PushGoFunction) run while
+		// the Lua registry is intact; then stop the GC so no finalizers run
+		// during lua_close() teardown, when the registry is partially destroyed.
+		// HISTORY: this block was disabled for a long time ("GC calls moved
+		// crash earlier") — the crashes were the golua panic-crossing
+		// corruption (VM call chain abandoned by Go panics unwinding across
+		// lua_pcall; fixed in the golua fork, upstream PR aarzilli/golua#131),
+		// for which close-time GC was merely the trigger, not the cause.
+		e.logger.Debug("[LuaEngine.Close] running full GC cycle...")
+		e.state.GC(lua.LUA_GCCOLLECT, 0)
 
-		// // Stop GC so no finalizers run during lua_close() teardownBut ed
-		// e.logger.Debug("[LuaEngine.Close] stopping GC...")
-		// e.state.GC(lua.LUA_GCSTOP, 0)
+		e.logger.Debug("[LuaEngine.Close] stopping GC...")
+		e.state.GC(lua.LUA_GCSTOP, 0)
 
 		e.logger.Debugf("[LuaEngine.Close] goroutine dump before lua_close:\n%s", groutine.Dump())
 		e.logger.Debug("[LuaEngine.Close] calling state.Close()...")

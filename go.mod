@@ -58,10 +58,10 @@ require (
 	gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c // indirect
 )
 
-//replace github.com/aarzilli/golua => /Users/srg/src/golua
-
 replace github.com/go-ble/ble => github.com/srgg/go-ble v0.0.0-20251019021511-162008c817dc
 
 tool github.com/srgg/testify/depend/cmd/dependgen
 
 //replace github.com/srgg/testify => /Users/srg/src/testify
+
+replace github.com/aarzilli/golua => github.com/srgg/golua v0.0.0-20260711032905-079ae1619b57

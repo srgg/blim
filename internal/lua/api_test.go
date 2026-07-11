@@ -4170,23 +4170,98 @@ func (suite *LuaApiTestSuite) TestProtectedCall() {
 			`)
 	})
 
-	suite.Run("error from a Go-backed function aborts the script", func() {
-		// GOAL: Pin the documented blim.pcall limitation: errors raised by
-		//       Go-backed functions are Go-side panics that bypass the native
-		//       pcall — the script aborts with the original error, and the
-		//       engine survives it (the same path as any unprotected script
-		//       error).
+	suite.Run("error from a Go-backed function is caught like any Lua error", func() {
+		// GOAL: Verify errors raised by Go-backed functions behave as regular
+		//       Lua errors: the golua panic-safety fix contains the Go panic
+		//       at the cgo boundary and re-raises it as a lua_error, so
+		//       blim.pcall catches it and the script continues. (This inverts
+		//       the previously pinned limitation where such errors bypassed
+		//       pcall and aborted the script.)
 		//
-		// TEST SCENARIO: protected call of require with a missing module → script aborts with the require error → engine still runs the next script
+		// TEST SCENARIO: protected call of require with a missing module → false plus message, script continues → engine still runs the next script
 
 		suite.Connect("1").FluentLuaTest().
-			FailExecuteScript("no_such_module", `
-				blim.pcall(require, "no_such_module")
+			MustExecuteScript(`
+				local ok, err = blim.pcall(require, "no_such_module")
+				assert(ok == false, "protected call MUST report the Go-side failure")
+				assert(tostring(err):find("no_such_module"),
+					"error message MUST be preserved, got: " .. tostring(err))
 			`).
 			MustExecuteScript(`
 				assert(blim.pcall(function() return true end) == true,
-					"engine MUST stay healthy after an uncaught Go-side error")
+					"engine MUST stay healthy after a caught Go-side error")
 			`)
+	})
+
+	suite.Run("standard pcall and xpcall globals are restored", func() {
+		// GOAL: Verify scripts get plain Lua semantics: golua hides
+		//       pcall/xpcall (Go panics used to bypass them unsafely); with
+		//       panic containment in the golua fork (PR aarzilli/golua#131)
+		//       that reason is gone and blim.lua restores the standard
+		//       globals, keeping blim.pcall as a compatibility alias.
+		//
+		// TEST SCENARIO: pcall catches a Lua error and a Go-backed error; xpcall runs its handler → script continues
+
+		suite.Connect("1").FluentLuaTest().
+			MustExecuteScript(`
+				assert(pcall == blim.pcall, "global pcall MUST be the same native as blim.pcall")
+				local ok, err = pcall(function() error("plain") end)
+				assert(ok == false and tostring(err):find("plain"),
+					"pcall MUST catch Lua errors, got: " .. tostring(err))
+				local ok2, err2 = pcall(require, "no_such_module_g4")
+				assert(ok2 == false and tostring(err2):find("no_such_module_g4"),
+					"pcall MUST catch Go-backed errors, got: " .. tostring(err2))
+				local ok3, msg = xpcall(function() error("boom") end,
+					function(m) return "handled: " .. tostring(m) end)
+				assert(ok3 == false and tostring(msg):find("handled: "),
+					"xpcall handler MUST run during unwinding, got: " .. tostring(msg))
+			`)
+	})
+}
+
+// TestGoluaDependencyContract canary-guards the golua fork fixes that blim
+// depends on (go.mod: replace => github.com/srgg/golua; upstream PRs
+// aarzilli/golua#130 and #131). Each subtest expresses one dependency
+// guarantee through blim-domain behavior only — the exhaustive mechanism
+// tests live in the golua fork (lua/thread_dispatch_test.go,
+// lua/error_propagation_test.go) and are deliberately NOT repeated here.
+// If the dependency loses the fixes (replace dropped to stock golua, or an
+// upstream regression after the PRs merge), these fail loudly. The third
+// guarantee — blim.pcall catching Go-backed errors — is already pinned by
+// TestProtectedCall.
+func (suite *LuaApiTestSuite) TestGoluaDependencyContract() {
+	suite.Run("blim API works inside user coroutines", func() {
+		// GOAL: Guard the thread-dispatch fix (golua PR #130): a Go-backed
+		//       blim.* function called from a user-created coroutine must
+		//       operate on the coroutine's stack. On stock golua it reads
+		//       the main state's (unrelated) stack and returns garbage.
+		//
+		// TEST SCENARIO: coroutine.wrap calls blim.characteristic → the handle is correct inside the coroutine
+
+		suite.Connect("1").FluentLuaTest().
+			MustExecuteScript(`
+				local uuid = coroutine.wrap(function()
+					local char = blim.characteristic("180d", "2a37")
+					assert(char ~= nil, "characteristic lookup MUST work inside a coroutine")
+					return char.uuid
+				end)()
+				assert(uuid == "2a37", "expected uuid 2a37, got " .. tostring(uuid))
+			`)
+	})
+
+	suite.Run("script errors do not degrade the engine", func() {
+		// GOAL: Guard the panic-containment fix (golua PR #131 / upstream
+		//       issue #24): every script error must be reported with its own
+		//       message. On stock golua the second error on the same engine
+		//       already degrades to "error in error handling".
+		//
+		// TEST SCENARIO: three erroring scripts on one engine each report their own message → a healthy script still runs
+
+		suite.Connect("1").FluentLuaTest().
+			FailExecuteScript("first-error", `error("first-error")`).
+			FailExecuteScript("second-error", `error("second-error")`).
+			FailExecuteScript("third-error", `error("third-error")`).
+			MustExecuteScript(`assert(true, "engine MUST stay healthy after repeated script errors")`)
 	})
 }
 
