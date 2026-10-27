@@ -952,6 +952,46 @@ func (suite *BridgeTestSuite) TestRunCliBridgeIntegration() {
 		}
 	})
 
+	suite.Run("stops without cancellation when script calls blim.exit", func() {
+		// GOAL: Verify a script can end the bridge itself, without Ctrl+C or a disconnect
+		//
+		// TEST SCENARIO: Script calls blim.exit() and returns → bridge returns no error → within maxShutdownDuration, context never cancelled
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		testDevice := suite.Connect("test-addr")
+		luaAPI := lua.NewBLEAPI2(testDevice.Device, suite.Logger)
+		defer luaAPI.Close()
+
+		factory := &testBridgeFactory{
+			wrapper: &luaAPIWrapper{
+				LuaAPI: luaAPI,
+				logger: suite.Logger,
+			},
+			originalFactory: devicefactory.DefaultBridgeFactory,
+		}
+
+		bridgeDone := make(chan error, 1)
+		go func() {
+			bridgeDone <- RunCliBridge(ctx, nil, CLIBridgeConfig{
+				DeviceAddress: "test-addr",
+				ScriptContent: `blim.exit()`,
+				Logger:        suite.Logger,
+				Factory:       factory,
+				Stdout:        os.Stdout,
+				Stderr:        os.Stderr,
+			})
+		}()
+
+		select {
+		case err := <-bridgeDone:
+			suite.NoError(err, "Bridge MUST exit cleanly after blim.exit()")
+		case <-time.After(maxShutdownDuration):
+			suite.Fail("Bridge kept running after blim.exit()")
+		}
+	})
+
 	suite.Run("shuts down cleanly when script is blocked on io.read", func() {
 		// GOAL: Verify bridge exits cleanly when the Lua script is blocked on io.read() and context is cancelled
 		//

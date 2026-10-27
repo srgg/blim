@@ -357,9 +357,14 @@ func RunCliBridge(ctx context.Context, progressCallback ProgressCallback, opts C
 
 		opts.Logger.Info("Bridge monitoring started, waiting for shutdown or disconnect...")
 
-		// Wait for context cancellation (handles both disconnect AND Ctrl+C)
+		// Wait for context cancellation (handles both disconnect AND Ctrl+C) or blim.exit()
 		// RunDeviceBridge cancels ctx with ErrConnectionLost on disconnect
-		<-ctx.Done()
+		select {
+		case <-ctx.Done():
+		case <-b.GetLuaAPI().ExitRequested():
+			opts.Logger.Info("Script called blim.exit(), bridge shutting down...")
+			return nil, nil
+		}
 		cause := context.Cause(ctx)
 		if cause != nil && errors.Is(cause, device.ErrConnectionLost) {
 			return nil, device.ErrConnectionLost
