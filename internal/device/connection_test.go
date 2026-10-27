@@ -147,6 +147,22 @@ func (suite *ConnectionTestSuite) TestConnectionCharacteristics() {
 		suite.Assert().Equal("service \"ffff\" not found", err.Error(), "error message MUST match expected format")
 	})
 
+	suite.Run("finds a service the peripheral showed after connect", func() {
+		// GOAL: Verify a service hidden at Connect and shown later is found without a reconnect
+		//
+		// TEST SCENARIO: Connect while ff60 is hidden → client profile gains ff60 → GetCharacteristic finds ff61
+		suite.GivenPeripheral(func(b *testutils.PeripheralDeviceBuilder) {
+			b.WithService("180f").WithCharacteristic("2a19", "read,notify", []byte{85}).
+				WithService("ff60").ShownAfterConnect().WithCharacteristic("ff61", "read,notify", []byte{1})
+		})
+		dev := suite.Connect("22")
+
+		char, err := dev.GetConnection().GetCharacteristic("ff60", "ff61")
+
+		suite.Require().NoError(err, "MUST find a characteristic of a service shown after connect")
+		suite.Assert().Equal("ff61", char.UUID(), "characteristic UUID MUST match")
+	})
+
 	suite.Run("multiple characteristics in service", func() {
 		// GOAL: Verify multiple characteristics can be retrieved from same service
 		//
