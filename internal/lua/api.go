@@ -59,6 +59,9 @@ type LuaAPIInterface interface {
 	// Returns a function to remove the hook. Used to unblock io.read() by closing PTY.
 	AddShutdownHook(fn func()) (remove func())
 
+	// ExitRequested is closed once the script calls blim.exit().
+	ExitRequested() <-chan struct{}
+
 	Close()
 }
 
@@ -86,6 +89,8 @@ type LuaAPI struct {
 	callbackRefsMu             sync.Mutex       // Protects subscriptionCallbackRefs map
 	luaCallbackWG              sync.WaitGroup   // Tracks in-flight async callbacks for safe shutdown
 	shuttingDown               atomic.Bool      // Set during shutdown to block new callbacks before Wait()
+	exitCh                     chan struct{}    // Closed by blim.exit()
+	exitOnce                   sync.Once        // blim.exit() may be called more than once
 	// Callback-depth tracking (inCallbackCount) lives on LuaEngine now — it is a property of the
 	// shared lua_State, and LuaEngine-registered primitives (io.read) must consult it too.
 }
@@ -100,6 +105,7 @@ func NewBLEAPI2(device device.Device, logger *logrus.Logger) *LuaAPI {
 		characteristicWriteTimeout: DefaultCharacteristicWriteTimeout,
 		ptyCallbackRef:             lua.LUA_NOREF,          // No callback registered initially
 		subscriptionCallbackRefs:   make(map[int]struct{}), // Initialize map for O(1) add/remove
+		exitCh:                     make(chan struct{}),
 	}
 
 	r.Reset()
@@ -480,6 +486,7 @@ func (api *LuaAPI) registerBlimAPI() {
 
 		// Register utility functions
 		api.registerSleepFunction(L)
+		api.registerExitFunction(L)
 
 		// Register bridge info if set
 		api.registerBridgeInfo(L)
@@ -1419,6 +1426,23 @@ func (api *LuaAPI) registerCharacteristicFunction(L *lua.State) {
 		// TODO: Add methods (subscribe, unsubscribe) if needed
 
 		return 1
+	})
+	L.SetTable(-3)
+}
+
+// ExitRequested is closed once the script calls blim.exit().
+func (api *LuaAPI) ExitRequested() <-chan struct{} {
+	return api.exitCh
+}
+
+// registerExitFunction registers the blim.exit() utility function
+// Usage: blim.exit()
+// A script that returns does not end the bridge, which keeps serving callbacks
+// until it is cancelled, so an interactive script asks for the stop explicitly.
+func (api *LuaAPI) registerExitFunction(L *lua.State) {
+	api.SafePushGoFunction(L, "exit", func(L *lua.State) int {
+		api.exitOnce.Do(func() { close(api.exitCh) })
+		return 0
 	})
 	L.SetTable(-3)
 }

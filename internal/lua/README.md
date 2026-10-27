@@ -841,6 +841,23 @@ if attempt >= max_attempts then
 end
 ```
 
+### `blim.exit()`
+Stops the bridge. A script that returns without it leaves the bridge serving callbacks until
+Ctrl+C or a disconnect. Takes effect when the script returns; called from a callback, at once.
+
+**Returns:** Nothing
+
+**Example: Quit key**
+```lua
+while true do
+    if blim.term.read_char() == "q" then
+        blim.exit()
+        break
+    end
+    blim.sleep(20)
+end
+```
+
 ### `blim.write_receive(opts)` → `data, err`
 Writes to a characteristic and waits for a notification/indication response (synchronous, blocking).
 

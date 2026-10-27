@@ -11,6 +11,7 @@ blim.characteristic = native.characteristic
 blim.device = native.device
 blim.bridge = native.bridge
 blim.sleep = native.sleep
+blim.exit = native.exit
 
 -- Protected calls. golua hides the stock pcall/xpcall (renaming them to
 -- unsafe_pcall/unsafe_xpcall) because Go panics used to bypass them and
