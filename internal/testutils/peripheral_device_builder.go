@@ -79,6 +79,9 @@ type CharacteristicConfig struct {
 type ServiceConfig struct {
 	UUID            string                 `json:"uuid" yaml:"service"`
 	Characteristics []CharacteristicConfig `json:"characteristics,omitempty" yaml:"characteristics,omitempty"`
+	// ShownAfterConnect leaves the service out of the discovery Connect runs and puts it in the
+	// profile the client reports afterwards, as a service the peripheral showed later does.
+	ShownAfterConnect bool `json:"shown_after_connect,omitempty" yaml:"shown_after_connect,omitempty"`
 }
 
 // DeviceProfileConfig represents the complete device profile for mocking
@@ -206,6 +209,12 @@ func (b *PeripheralDeviceBuilder) WithService(uuid string) *PeripheralDeviceBuil
 		UUID:            uuid,
 		Characteristics: []CharacteristicConfig{},
 	})
+	return b
+}
+
+// ShownAfterConnect marks the last added service as hidden at Connect and shown afterwards.
+func (b *PeripheralDeviceBuilder) ShownAfterConnect() *PeripheralDeviceBuilder {
+	b.profile.Services[len(b.profile.Services)-1].ShownAfterConnect = true
 	return b
 }
 
@@ -504,14 +513,21 @@ func (b *PeripheralDeviceBuilder) Build() blelib.Device {
 		bleServices = append(bleServices, bleService)
 	}
 
-	// Create the profile that will be returned by DiscoverProfile
+	// DiscoverProfile answers what Connect sees; Profile answers what the client knows later.
+	var discovered []*blelib.Service
+	for i, svc := range bleServices {
+		if !b.profile.Services[i].ShownAfterConnect {
+			discovered = append(discovered, svc)
+		}
+	}
 	mockProfile := &blelib.Profile{
-		Services: bleServices,
+		Services: discovered,
 	}
 
 	// Set up mock expectations
 	mockDevice.On("Dial", mock.Anything, mock.Anything).Return(mockClient, nil)
 	mockClient.On("DiscoverProfile", true).Return(mockProfile, nil)
+	mockClient.On("Profile").Return(&blelib.Profile{Services: bleServices}).Maybe()
 	mockClient.On("CancelConnection").Return(nil)
 
 	// Set up disconnect channel expectation for graceful disconnect handling.

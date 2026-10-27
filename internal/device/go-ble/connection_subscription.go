@@ -296,6 +296,8 @@ func (c *BLEConnection) SubscribeWithName(name string, opts []*device.SubscribeO
 		"mode":     mode,
 	}).Debug("Subscribe called - about to create goroutine")
 
+	c.syncProfile()
+
 	c.connMutex.Lock()
 
 	// Check if connected (we already hold the lock, so use a safe version)

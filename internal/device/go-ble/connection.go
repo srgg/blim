@@ -64,7 +64,8 @@ type BLEConnection struct {
 	isConnected           bool
 	descriptorReadTimeout time.Duration // Timeout for reading descriptor values during discovery
 
-	services map[string]*BLEService
+	services        map[string]*BLEService
+	profileServices int // services of the client's profile merged into services
 
 	subMgr *SubscriptionManager
 	ctx    context.Context
@@ -72,6 +73,113 @@ type BLEConnection struct {
 
 	valuePool *BLEVValuePool
 	ConnDiag  *ConnectionDiagnostics // nil in production, populated in test
+}
+
+// mergeProfile adds the services and characteristics of profile that services lacks, and
+// rebinds the ones it has to profile's objects. Callers hold connMutex for writing.
+func (c *BLEConnection) mergeProfile(client ble.Client, bleProfile *ble.Profile) {
+	for _, bleSvc := range bleProfile.Services {
+		svcRawUUID := bleSvc.UUID.String()
+		svcUUID := device.NormalizeUUID(svcRawUUID)
+		c.logger.WithField("service_uuid", svcRawUUID).Trace("Found service UUID")
+		svc, ok := c.services[svcUUID]
+		if !ok {
+			svc = &BLEService{
+				uuid:            svcUUID,                         // store normalized
+				knownName:       bledb.LookupService(svcRawUUID), // lookup using raw form if DB expects dashed
+				Characteristics: make(map[string]*BLECharacteristic),
+			}
+			c.services[svcUUID] = svc
+		}
+
+		for _, bleCharacteristic := range bleSvc.Characteristics {
+			charRawUUID := bleCharacteristic.UUID.String()
+			charUUID := device.NormalizeUUID(charRawUUID)
+			c.logger.WithFields(logrus.Fields{
+				"service_uuid": svcUUID,
+				"char_uuid":    charRawUUID,
+			}).Trace("Found characteristic UUID")
+			characteristic, ok := svc.Characteristics[charUUID]
+			if !ok {
+				// Use descriptors from DiscoverProfile (already discovered)
+				// Note: On Darwin/macOS, the BLE library does not populate descriptor Handle fields,
+				// which means descriptors cannot be read. This is a limitation of the go-ble/ble Darwin implementation.
+				// The descriptors are listed for informational purposes, but their values will be nil.
+
+				// Create descriptors with values (reads are best-effort, won't fail characteristic creation)
+				descriptors := make([]device.Descriptor, 0, len(bleCharacteristic.Descriptors))
+				for idx, d := range bleCharacteristic.Descriptors {
+					descriptors = append(descriptors, newDescriptor(d, c, client, c.descriptorReadTimeout, uint8(idx), c.logger))
+				}
+
+				// Parse well-known descriptor formats. if any
+				for _, d := range descriptors {
+					if d.ParsedValue() != nil {
+						continue
+					}
+
+					// Parse well-known descriptors automatically
+					if parsed, err := device.ParseDescriptorValue(d.UUID(), d.Value(), descriptors); err == nil {
+						d.(*BLEDescriptor).parsedValue = parsed
+					} else {
+						// Parse error - set parsedValue to DescriptorError
+						d.(*BLEDescriptor).parsedValue = &device.DescriptorError{
+							Reason: "parse_error",
+							Err:    err,
+						}
+						if c.logger != nil {
+							c.logger.WithFields(logrus.Fields{
+								"descriptor_uuid": d.UUID(),
+								"error":           err,
+							}).Debug("Failed to parse descriptor value")
+						}
+					}
+				}
+				// Sort by UUID for consistent ordering
+				sort.Slice(descriptors, func(i, j int) bool {
+					return descriptors[i].UUID() < descriptors[j].UUID()
+				})
+
+				// Create BLECharacteristic with pre-created descriptors
+				characteristic = NewCharacteristic(bleCharacteristic, DefaultChannelBuffer, c, descriptors)
+				svc.Characteristics[charUUID] = characteristic
+			} else {
+				// Reconnecting - update live handle and recreate channel if closed on disconnect
+				characteristic.BLEChar = bleCharacteristic
+				if characteristic.closed.Load() {
+					if err := characteristic.ResetUpdates(DefaultChannelBuffer); err != nil {
+						c.logger.WithFields(logrus.Fields{
+							"char_uuid": charUUID,
+							"error":     err,
+						}).Warn("Failed to reset updates channel during reconnection")
+					}
+				}
+			}
+		}
+	}
+	c.profileServices = len(bleProfile.Services)
+}
+
+// syncProfile merges the services the client's profile gained after Connect: one the
+// peripheral hid at discovery and showed later, which the client adds when it rediscovers
+// after a Service Changed. The count check keeps a lookup that finds nothing new to a read lock.
+func (c *BLEConnection) syncProfile() {
+	c.connMutex.RLock()
+	client, seen := c.client, c.profileServices
+	c.connMutex.RUnlock()
+	if client == nil {
+		return
+	}
+	profile := client.Profile()
+	if profile == nil || len(profile.Services) <= seen {
+		return
+	}
+
+	c.connMutex.Lock()
+	defer c.connMutex.Unlock()
+	if c.client == client {
+		c.mergeProfile(client, profile)
+	}
 }
 
 // GetSubscriptionManager returns the subscription manager for testing.
@@ -83,9 +191,15 @@ func (c *BLEConnection) GetSubscriptionManager() *SubscriptionManager {
 // Both UUIDs are normalized for consistent lookup (lowercase, no dashes).
 // Returns a NotFoundError if the service or characteristic is not found.
 func (c *BLEConnection) GetCharacteristic(service, uuid string) (device.Characteristic, error) {
+	c.syncProfile()
+
 	// Normalize UUIDs for a consistent lookup
 	normalizedServiceUUID := device.NormalizeUUID(service)
 	normalizedCharUUID := device.NormalizeUUID(uuid)
+
+	// syncProfile writes the map while the connection lives.
+	c.connMutex.RLock()
+	defer c.connMutex.RUnlock()
 
 	svc, ok := c.services[normalizedServiceUUID]
 	if !ok {
@@ -103,6 +217,8 @@ func (c *BLEConnection) GetCharacteristic(service, uuid string) (device.Characte
 // Services returns all discovered BLE services for this connection.
 // Services are sorted by UUID for consistent ordering. Thread-safe.
 func (c *BLEConnection) Services() []device.Service {
+	c.syncProfile()
+
 	c.connMutex.RLock()
 	defer c.connMutex.RUnlock()
 
@@ -121,6 +237,8 @@ func (c *BLEConnection) Services() []device.Service {
 // The UUID is normalized for consistent lookup (lowercase, no dashes).
 // Returns a NotFoundError if the service is not found.
 func (c *BLEConnection) GetService(uuid string) (device.Service, error) {
+	c.syncProfile()
+
 	c.connMutex.RLock()
 	defer c.connMutex.RUnlock()
 
@@ -247,86 +365,7 @@ func (c *BLEConnection) Connect(ctx context.Context, address string, opts *devic
 		"services": len(bleProfile.Services),
 	}).Debug("Profile discovered successfully")
 
-	// Populate services and characteristics from BLE Profile
-	for _, bleSvc := range bleProfile.Services {
-		svcRawUUID := bleSvc.UUID.String()
-		svcUUID := device.NormalizeUUID(svcRawUUID)
-		c.logger.WithField("service_uuid", svcRawUUID).Trace("Found service UUID")
-		svc, ok := c.services[svcUUID]
-		if !ok {
-			svc = &BLEService{
-				uuid:            svcUUID,                         // store normalized
-				knownName:       bledb.LookupService(svcRawUUID), // lookup using raw form if DB expects dashed
-				Characteristics: make(map[string]*BLECharacteristic),
-			}
-			c.services[svcUUID] = svc
-		}
-
-		for _, bleCharacteristic := range bleSvc.Characteristics {
-			charRawUUID := bleCharacteristic.UUID.String()
-			charUUID := device.NormalizeUUID(charRawUUID)
-			c.logger.WithFields(logrus.Fields{
-				"service_uuid": svcUUID,
-				"char_uuid":    charRawUUID,
-			}).Trace("Found characteristic UUID")
-			characteristic, ok := svc.Characteristics[charUUID]
-			if !ok {
-				// Use descriptors from DiscoverProfile (already discovered)
-				// Note: On Darwin/macOS, the BLE library does not populate descriptor Handle fields,
-				// which means descriptors cannot be read. This is a limitation of the go-ble/ble Darwin implementation.
-				// The descriptors are listed for informational purposes, but their values will be nil.
-
-				// Create descriptors with values (reads are best-effort, won't fail characteristic creation)
-				descriptors := make([]device.Descriptor, 0, len(bleCharacteristic.Descriptors))
-				for idx, d := range bleCharacteristic.Descriptors {
-					descriptors = append(descriptors, newDescriptor(d, c, client, c.descriptorReadTimeout, uint8(idx), c.logger))
-				}
-
-				// Parse well-known descriptor formats. if any
-				for _, d := range descriptors {
-					if d.ParsedValue() != nil {
-						continue
-					}
-
-					// Parse well-known descriptors automatically
-					if parsed, err := device.ParseDescriptorValue(d.UUID(), d.Value(), descriptors); err == nil {
-						d.(*BLEDescriptor).parsedValue = parsed
-					} else {
-						// Parse error - set parsedValue to DescriptorError
-						d.(*BLEDescriptor).parsedValue = &device.DescriptorError{
-							Reason: "parse_error",
-							Err:    err,
-						}
-						if c.logger != nil {
-							c.logger.WithFields(logrus.Fields{
-								"descriptor_uuid": d.UUID(),
-								"error":           err,
-							}).Debug("Failed to parse descriptor value")
-						}
-					}
-				}
-				// Sort by UUID for consistent ordering
-				sort.Slice(descriptors, func(i, j int) bool {
-					return descriptors[i].UUID() < descriptors[j].UUID()
-				})
-
-				// Create BLECharacteristic with pre-created descriptors
-				characteristic = NewCharacteristic(bleCharacteristic, DefaultChannelBuffer, c, descriptors)
-				svc.Characteristics[charUUID] = characteristic
-			} else {
-				// Reconnecting - update live handle and recreate channel if closed on disconnect
-				characteristic.BLEChar = bleCharacteristic
-				if characteristic.closed.Load() {
-					if err := characteristic.ResetUpdates(DefaultChannelBuffer); err != nil {
-						c.logger.WithFields(logrus.Fields{
-							"char_uuid": charUUID,
-							"error":     err,
-						}).Warn("Failed to reset updates channel during reconnection")
-					}
-				}
-			}
-		}
-	}
+	c.mergeProfile(client, bleProfile)
 
 	// Mark as connected and assign client
 	c.client = client
