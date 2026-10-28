@@ -124,9 +124,9 @@ func (r *PrefetchFileReader) ReadBytes(ctx context.Context, n int) ([]byte, erro
 			return nil, ErrReaderClosed
 		}
 
-		// Try to read from buffer
+		// Read from buffer; TryRead would fail with ErrAcquireLock while the prefetcher writes
 		needed := n - len(result)
-		got, err := r.ReadBuffer().TryRead(buf[:needed])
+		got, err := r.ReadBuffer().Read(buf[:needed])
 		if got > 0 {
 			result = append(result, buf[:got]...)
 			continue
@@ -183,8 +183,8 @@ func (r *PrefetchFileReader) ReadLine(ctx context.Context) (string, error) {
 			return "", ErrReaderClosed
 		}
 
-		// Try to read one byte
-		got, err := r.ReadBuffer().TryRead(buf)
+		// Read one byte; TryRead would fail with ErrAcquireLock while the prefetcher writes
+		got, err := r.ReadBuffer().Read(buf)
 		if got > 0 {
 			result.WriteByte(buf[0])
 			if buf[0] == '\n' {
