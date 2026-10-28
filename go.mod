@@ -58,7 +58,7 @@ require (
 	gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c // indirect
 )
 
-replace github.com/go-ble/ble => github.com/srgg/go-ble v0.0.0-20251019021511-162008c817dc
+replace github.com/go-ble/ble => github.com/srgg/go-ble v0.0.0-20261028003343-023736f01b4f
 
 tool github.com/srgg/testify/depend/cmd/dependgen
 
