@@ -28,7 +28,6 @@ require (
 )
 
 require (
-	github.com/JuulLabs-OSS/cbgo v0.0.2 // indirect
 	github.com/Masterminds/semver/v3 v3.4.0 // indirect
 	github.com/bahlo/generic-list-go v0.2.0 // indirect
 	github.com/buger/jsonparser v1.1.1 // indirect
@@ -52,13 +51,14 @@ require (
 	github.com/sergi/go-diff v1.4.0 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect
 	github.com/stretchr/objx v0.5.3 // indirect
+	github.com/tinygo-org/cbgo v0.1.0 // indirect
 	github.com/yudai/golcs v0.0.0-20170316035057-ecda9a501e82 // indirect
 	github.com/yudai/pp v2.0.1+incompatible // indirect
 	golang.org/x/text v0.28.0 // indirect
 	gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c // indirect
 )
 
-replace github.com/go-ble/ble => github.com/srgg/go-ble v0.0.0-20261028003343-023736f01b4f
+replace github.com/go-ble/ble => github.com/srgg/go-ble v0.0.0-20261028192722-b8b960881956
 
 tool github.com/srgg/testify/depend/cmd/dependgen
 
