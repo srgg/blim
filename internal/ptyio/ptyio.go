@@ -421,10 +421,11 @@ func (p *ringPTY) Read(b []byte) (n int, err error) {
 		return 0, nil
 	}
 
-	// Read bytes from the ring buffer (bulk operation, from base)
-	n, err = p.ReadBuffer().TryRead(b)
+	// Read bytes from the ring buffer (bulk operation, from base); TryRead would fail
+	// with ErrAcquireLock while the PTY reader writes
+	n, err = p.ReadBuffer().Read(b)
 	if err != nil && !errors.Is(err, ringbuffer.ErrIsEmpty) {
-		p.Logger().Warnf("Read TryRead error: %v", err)
+		p.Logger().Warnf("Read error: %v", err)
 		return 0, err
 	}
 
