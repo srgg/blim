@@ -370,10 +370,12 @@ func (d *SubscriptionDiagnostics) verifyExplicitCancel() {
 		errors = append(errors, CleanupError{"context", "not cancelled"})
 	}
 
-	// Fan-outs we started must be stopped (if we were last subscriber)
+	// Fan-outs we started must be stopped (if we were last subscriber). A subscriber that
+	// arrived after the cancel keeps the fan-out running; the count is read after the
+	// fan-out state so that subscriber cannot slip in between the two reads.
 	for _, c := range d.Chars {
 		if d.FirstSubscriberFor[c.UUID()] {
-			if c.HasActiveFanOut() && d.SubscriberCountsBefore[c.UUID()] == 1 {
+			if c.HasActiveFanOut() && d.SubscriberCountsBefore[c.UUID()] == 1 && c.SubscriberCount() == 0 {
 				errors = append(errors, CleanupError{"fanout",
 					fmt.Sprintf("fan-out for %s still running (we were last)", c.UUID())})
 			}
@@ -384,7 +386,7 @@ func (d *SubscriptionDiagnostics) verifyExplicitCancel() {
 	for _, c := range d.Chars {
 		if d.FirstSubscriberFor[c.UUID()] && d.SubscriberCountsBefore[c.UUID()] == 1 {
 			fanoutName := fmt.Sprintf("fanout-%s", c.UUID())
-			if groutine.IsRunning(fanoutName) {
+			if groutine.IsRunning(fanoutName) && c.SubscriberCount() == 0 {
 				errors = append(errors, CleanupError{"fanout_goroutine",
 					fmt.Sprintf("%q still running", fanoutName)})
 			}
