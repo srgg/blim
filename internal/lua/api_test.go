@@ -2316,6 +2316,31 @@ func (suite *LuaApiTestSuite) TestPTYOnData() {
 		`)
 	})
 
+	suite.Run("PTY data delivered after unregister runs no callback", func() {
+		testBridge := &testBridgeInfo{ttyName: "/dev/ttys999", ptyIO: &MockStrategy{}}
+		ft := suite.Connect("1").FluentLuaTest().
+			WithBridge(testBridge).
+			MustExecuteScript(`
+				hits = 0
+				blim.bridge.pty_on_data(function(data) end)
+			`)
+		// late stands in for PTY data already queued on the Lua state lock when the unregister runs.
+		late := testBridge.readCallback
+
+		// The subscription takes the registry slot the unregister freed.
+		ft.MustExecuteScript(`
+			blim.bridge.pty_on_data(nil)
+			blim.subscribe{
+				services = {{ service = "1234", chars = {"5678"} }},
+				Mode = "EveryUpdate",
+				Callback = function(r) hits = hits + 1 end
+			}
+		`)
+		late([]byte("late"))
+
+		ft.MustExecuteScript(`assert(hits == 0, "PTY data ran a subscription's callback")`)
+	})
+
 	suite.Run("Error when called without bridge", func() {
 		// GOAL: Verify pty_on_data() returns error when bridge not set
 		//
@@ -4064,6 +4089,35 @@ func (suite *LuaApiTestSuite) TestSubscriptionCancellation() {
 		api.callbackRefsMu.Lock()
 		suite.Equal(0, len(api.subscriptionCallbackRefs))
 		api.callbackRefsMu.Unlock()
+	})
+
+	suite.Run("Notification delivered after cancel runs no callback", func() {
+		// late stands in for a notification already queued on the Lua state lock when cancel runs.
+		ft := suite.Connect("01").FluentLuaTest()
+		bleConn := getBLEConnection(ft.LuaAPI())
+
+		ft.MustExecuteScript(`
+			hits = 0
+			cancelA = blim.subscribe{
+				services = {{ service = "1234", chars = {"5678"} }},
+				Mode = "EveryUpdate",
+				Callback = function(r) end
+			}
+		`)
+		late := bleConn.ConnDiag.Subscriptions[0].Callback
+
+		// B takes the registry slot A's cancel freed.
+		ft.MustExecuteScript(`
+			cancelA()
+			blim.subscribe{
+				services = {{ service = "1234", chars = {"5678"} }},
+				Mode = "EveryUpdate",
+				Callback = function(r) hits = hits + 1 end
+			}
+		`)
+		late(&device.Record{Values: map[string][]byte{"5678": {0x01}}})
+
+		ft.MustExecuteScript(`assert(hits == 0, "A's notification ran B's callback")`)
 	})
 
 	suite.Run("Stress test: no goroutine leaks after repeated subscribe/cancel cycles", func() {

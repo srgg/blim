@@ -898,6 +898,9 @@ func (api *LuaAPI) executeSubscription(config *LuaSubscriptionTable) (func(), er
 	var cancelMu sync.RWMutex
 	var cancel func()
 
+	// Set before every release of callbackRef: the registry hands a freed slot to the next Ref.
+	var released atomic.Bool
+
 	// Create a callback that calls the Lua function (nil if no callback provided)
 	var callback func(*device.Record)
 	if callbackRef != lua.LUA_NOREF {
@@ -914,7 +917,7 @@ func (api *LuaAPI) executeSubscription(config *LuaSubscriptionTable) (func(), er
 			cancelMu.RLock()
 			cancelFn := cancel
 			cancelMu.RUnlock()
-			api.callLuaCallback(callbackRef, record, cancelFn)
+			api.callLuaCallback(callbackRef, &released, record, cancelFn)
 		}
 	}
 
@@ -923,6 +926,7 @@ func (api *LuaAPI) executeSubscription(config *LuaSubscriptionTable) (func(), er
 	if err != nil {
 		// Clean up tracked ref on subscribe failure - use single source of truth
 		if callbackRef != lua.LUA_NOREF {
+			released.Store(true)
 			api.releaseCallbackRefInternal(callbackRef)
 		}
 		return nil, err
@@ -938,6 +942,7 @@ func (api *LuaAPI) executeSubscription(config *LuaSubscriptionTable) (func(), er
 			}
 			rawCancel()
 			if callbackRef != lua.LUA_NOREF {
+				released.Store(true)
 				api.releaseCallbackRefInternal(callbackRef)
 			}
 		})
@@ -993,6 +998,11 @@ func (api *LuaAPI) callPTYDataCallback(callbackRef int, data []byte) error {
 	}()
 
 	api.LuaEngine.DoWithState(func(L *lua.State) interface{} {
+		// pty_on_data frees callbackRef under this lock while PTY data can be queued on it;
+		// only the ref still registered names the current handler.
+		if api.ptyCallbackRef != callbackRef {
+			return nil
+		}
 
 		// Save stack position before pushing callback items.
 		// On error, we restore to this position (not 0) to preserve any stack frames
@@ -1040,7 +1050,7 @@ func (api *LuaAPI) callPTYDataCallback(callbackRef int, data []byte) error {
 
 // callLuaCallback calls the Lua callback function with the record data and cancel function.
 // The cancel function is passed as the second argument to enable self-cancellation from Lua.
-func (api *LuaAPI) callLuaCallback(callbackRef int, record *device.Record, cancelFn func()) error {
+func (api *LuaAPI) callLuaCallback(callbackRef int, released *atomic.Bool, record *device.Record, cancelFn func()) error {
 	// Check shuttingDown BEFORE Add() to prevent new callbacks during shutdown.
 	// This ensures luaCallbackWG.Wait() in Close() won't block on new callbacks.
 	if api.shuttingDown.Load() {
@@ -1084,6 +1094,11 @@ func (api *LuaAPI) callLuaCallback(callbackRef int, record *device.Record, cance
 	}()
 
 	api.LuaEngine.DoWithState(func(L *lua.State) interface{} {
+		// cancel() runs under this lock and cannot wait for a notification queued on it,
+		// so the notification can arrive after callbackRef is freed.
+		if released.Load() {
+			return nil
+		}
 
 		// Save stack position before pushing callback items.
 		// On error, we restore to this position (not 0) to preserve any stack frames
