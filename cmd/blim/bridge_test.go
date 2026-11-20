@@ -12,7 +12,9 @@ import (
 	"time"
 
 	"github.com/sirupsen/logrus"
+	"github.com/spf13/cobra"
 	"github.com/srgg/blim/internal/testutils"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
 	"golang.org/x/term"
 )
@@ -25,6 +27,7 @@ type BridgeCmdTestSuite struct {
 		connectTimeout time.Duration
 		verbose        bool
 		luaScript      string
+		scriptArgs     map[string]string
 	}
 }
 
@@ -36,6 +39,7 @@ func (suite *BridgeCmdTestSuite) SetupSuite() {
 	suite.originalFlags.serviceUUID = bridgeServiceUUID
 	suite.originalFlags.connectTimeout = bridgeConnectTimeout
 	suite.originalFlags.luaScript = bridgeLuaScript
+	suite.originalFlags.scriptArgs = bridgeScriptArgs
 }
 
 // TearDownSuite restores original flags
@@ -43,6 +47,7 @@ func (suite *BridgeCmdTestSuite) TearDownSuite() {
 	bridgeServiceUUID = suite.originalFlags.serviceUUID
 	bridgeConnectTimeout = suite.originalFlags.connectTimeout
 	bridgeLuaScript = suite.originalFlags.luaScript
+	bridgeScriptArgs = suite.originalFlags.scriptArgs
 }
 
 // SetupTest initializes the test environment with a bridge-compatible peripheral
@@ -88,6 +93,7 @@ func (suite *BridgeCmdTestSuite) SetupTest() {
 	bridgeServiceUUID = "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
 	bridgeConnectTimeout = 30 * time.Second
 	bridgeLuaScript = ""
+	bridgeScriptArgs = nil
 
 	// Reset command flags
 	bridgeCmd.ResetFlags()
@@ -149,6 +155,134 @@ func (suite *BridgeCmdTestSuite) TestBridgeRestoresTerminalOnExit() {
 	if !reflect.DeepEqual(before, after) {
 		suite.Fail("terminal was not restored on exit",
 			"the terminal is still in a different mode than before the bridge ran — the script left it raw and Go did not restore it")
+	}
+}
+
+// TestBridgePassesScriptArgsToScript verifies that the arguments after "--" reach the Lua script's
+// global arg table through the real runBridgeCtx.
+func (suite *BridgeCmdTestSuite) TestBridgePassesScriptArgsToScript() {
+	// GOAL: parsed script arguments arrive in the script as string entries of the global arg table,
+	//       so a script can branch on a command-line switch.
+	//
+	// TEST SCENARIO: script args set → script asserts its arg entries and raises a marker error →
+	//                runBridgeCtx returns that marker error
+
+	r := suite.Require()
+
+	scriptFile := filepath.Join(suite.T().TempDir(), "args.lua")
+	r.NoError(os.WriteFile(scriptFile, []byte(`
+		assert(arg.debug == "true", "arg.debug must be \"true\"")
+		assert(arg.level == "3", "arg.level must be \"3\"")
+		error("script args verified")
+	`), 0o600))
+	bridgeLuaScript = scriptFile
+
+	args, err := parseScriptArgs([]string{"--debug", "--level=3"})
+	r.NoError(err)
+	bridgeScriptArgs = args
+
+	logger := logrus.New()
+	logger.SetOutput(io.Discard)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	err = runBridgeCtx(ctx, logger, TestDeviceAddress1)
+	r.ErrorContains(err, "script args verified")
+}
+
+// TestParseScriptArgsAccepted verifies the accepted spellings of a script argument.
+func TestParseScriptArgsAccepted(t *testing.T) {
+	// GOAL: "--name" is a switch set to "true", "--name=value" carries its value (empty and "="
+	//       inside the value included), and a repeated name keeps its last value.
+	//
+	// TEST SCENARIO: each spelling parsed → expected arg map → returned unchanged
+
+	tests := []struct {
+		name string
+		tail []string
+		want map[string]string
+	}{
+		{"no arguments", nil, nil},
+		{"switch", []string{"--debug"}, map[string]string{"debug": "true"}},
+		{"value", []string{"--level=3"}, map[string]string{"level": "3"}},
+		{"empty value", []string{"--level="}, map[string]string{"level": ""}},
+		{"equals inside value", []string{"--filter=a=b"}, map[string]string{"filter": "a=b"}},
+		{"dashes inside name", []string{"--bridge-debug"}, map[string]string{"bridge-debug": "true"}},
+		{"last repeat wins", []string{"--level=1", "--level=2"}, map[string]string{"level": "2"}},
+		{"mixed", []string{"--debug", "--level=3"}, map[string]string{"debug": "true", "level": "3"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseScriptArgs(tt.tail)
+			assert.NoError(t, err, "valid arguments MUST parse")
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+// TestParseScriptArgsRejected verifies that a malformed script argument is an error, not dropped.
+func TestParseScriptArgsRejected(t *testing.T) {
+	// GOAL: anything that is not "--name" or "--name=value" fails the parse, so a mistyped argument
+	//       never silently leaves the script on its default.
+	//
+	// TEST SCENARIO: positional, single-dash, bare "--" and nameless tokens parsed → error → no map
+
+	tests := []struct {
+		name string
+		tail []string
+	}{
+		{"positional", []string{"debug"}},
+		{"single dash", []string{"-d"}},
+		{"bare dashes", []string{"--"}},
+		{"nameless value", []string{"--=x"}},
+		{"empty token", []string{""}},
+		{"one bad among good", []string{"--debug", "level=3"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseScriptArgs(tt.tail)
+			assert.Error(t, err, "malformed arguments MUST be rejected")
+			assert.Nil(t, got, "no map MUST be returned on error")
+		})
+	}
+}
+
+// TestBridgeArgsAddressBeforeDash verifies the positional-argument rule of the bridge command.
+func TestBridgeArgsAddressBeforeDash(t *testing.T) {
+	// GOAL: exactly one positional argument, the device address, may precede "--"; the script's
+	//       arguments after it do not count against that limit.
+	//
+	// TEST SCENARIO: command lines parsed and validated → address plus any tail accepted, none or
+	//                extra positionals before "--" rejected
+
+	validate := func(argv []string) error {
+		// A fresh command per line: pflag keeps the position of "--" from the previous parse.
+		cmd := &cobra.Command{Use: "bridge", Args: bridgeArgs}
+		if err := cmd.ParseFlags(argv); err != nil {
+			return err
+		}
+		return cmd.ValidateArgs(cmd.Flags().Args())
+	}
+
+	accepted := [][]string{
+		{"ADDR"},
+		{"ADDR", "--"},
+		{"ADDR", "--", "--debug", "--level=3"},
+	}
+	for _, argv := range accepted {
+		assert.NoError(t, validate(argv), "address before \"--\" MUST be accepted: %v", argv)
+	}
+
+	rejected := [][]string{
+		{},
+		{"--", "--debug"},
+		{"--", "ADDR"},
+		{"ADDR", "extra"},
+		{"ADDR", "extra", "--", "--debug"},
+	}
+	for _, argv := range rejected {
+		assert.Error(t, validate(argv), "anything but one address before \"--\" MUST be rejected: %v", argv)
 	}
 }
 

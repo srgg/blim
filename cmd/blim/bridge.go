@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -19,7 +20,7 @@ import (
 
 // bridgeCmd represents the bridge command
 var bridgeCmd = &cobra.Command{
-	Use:   "bridge <device-address>",
+	Use:   "bridge <device-address> [flags] [-- script-args]",
 	Short: "Create a PTY bridge to a BLE device",
 	Long: fmt.Sprintf(`Creates a bidirectional PTY (pseudoterminal) bridge to a BLE device,
 allowing applications that expect a serial port to communicate with BLE devices.
@@ -38,8 +39,13 @@ Example:
   blim bridge %s
   blim bridge --service=custom-uuid %s
 
-%s`, exampleDeviceAddress, exampleDeviceAddress, deviceAddressNote),
-	Args: cobra.ExactArgs(1),
+Script arguments:
+  Everything after "--" reaches the Lua script in the global arg table: "--name" sets
+  arg.name to "true" and "--name=value" sets it to "value".
+  blim bridge %s --script bridge.lua -- --debug --level=3
+
+%s`, exampleDeviceAddress, exampleDeviceAddress, exampleDeviceAddress, deviceAddressNote),
+	Args: bridgeArgs,
 	RunE: runBridge,
 }
 
@@ -52,7 +58,43 @@ var (
 	bridgeLuaScript                  string
 	bridgeLuaLibs                    []string
 	bridgeSymlink                    string
+	bridgeScriptArgs                 map[string]string
 )
+
+// bridgeArgs accepts the device address as the only positional argument before "--". What follows
+// "--" is the script's own arguments, which runBridge parses with parseScriptArgs.
+func bridgeArgs(cmd *cobra.Command, args []string) error {
+	beforeDash := cmd.ArgsLenAtDash()
+	if beforeDash == -1 {
+		beforeDash = len(args)
+	}
+	if beforeDash != 1 {
+		return fmt.Errorf("accepts 1 arg(s) before \"--\", received %d", beforeDash)
+	}
+	return nil
+}
+
+// parseScriptArgs maps the arguments after "--" to the script's arg table: "--name" becomes
+// name = "true" and "--name=value" becomes name = "value". A repeated name keeps its last value.
+// Anything else is rejected instead of guessed at, so a mistyped argument is not silently dropped.
+func parseScriptArgs(tail []string) (map[string]string, error) {
+	if len(tail) == 0 {
+		return nil, nil
+	}
+	parsed := make(map[string]string, len(tail))
+	for _, token := range tail {
+		body, hasPrefix := strings.CutPrefix(token, "--")
+		name, value, hasValue := strings.Cut(body, "=")
+		if !hasPrefix || name == "" {
+			return nil, fmt.Errorf("invalid script argument %q: want --name or --name=value", token)
+		}
+		if !hasValue {
+			value = "true"
+		}
+		parsed[name] = value
+	}
+	return parsed, nil
+}
 
 func init() {
 	bridgeCmd.Flags().StringVar(&bridgeServiceUUID, "service", "6E400001-B5A3-F393-E0A9-E50E24DCCA9E", "BLE service UUID to bridge with")
@@ -72,6 +114,12 @@ func init() {
 func runBridge(cmd *cobra.Command, args []string) error {
 	// Configure logger based on --log-level and --verbose flags
 	logger, err := configureLogger(cmd, "verbose")
+	if err != nil {
+		return err
+	}
+
+	// bridgeArgs left the device address first, so everything after it follows "--".
+	bridgeScriptArgs, err = parseScriptArgs(args[1:])
 	if err != nil {
 		return err
 	}
@@ -139,8 +187,6 @@ func runBridgeCtx(ctx context.Context, logger *logrus.Logger, deviceAddress stri
 		scriptContent = blecli.DefaultBridgeLuaScript
 	}
 
-	var scriptArgs map[string]string
-
 	// Configure secure Lua module loading paths:
 	// - Script's directory is automatically included (enables require() for co-located modules)
 	// - Additional paths from --lua-lib flag are validated and added to allowed paths
@@ -163,7 +209,7 @@ func runBridgeCtx(ctx context.Context, logger *logrus.Logger, deviceAddress stri
 		Symlink:        bridgeSymlink,
 
 		ScriptContent: scriptContent,
-		ScriptArgs:    scriptArgs,
+		ScriptArgs:    bridgeScriptArgs,
 		ScriptOpts:    scriptOpts,
 		Stdout:        os.Stdout,
 		Stderr:        os.Stderr,
